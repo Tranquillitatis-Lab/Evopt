@@ -1,6 +1,6 @@
 # Benchmark adapters
 
-SWE-bench is the main benchmark workflow, following back-ops-ga's separation of task import, agent execution, and official grading. Evopt imports reviewed tasks, gives an existing coding agent a fresh repository at the task's base commit, and evaluates its patch with the pinned official Docker harness. The optimizer changes only allowlisted prompts and tool descriptions. Your existing agent retains its runtime, tools, permissions, and accounting.
+SWE-bench is the main benchmark workflow, with separate task import, agent execution, and official grading. Evopt imports reviewed tasks, gives an existing coding agent a fresh repository at the task's base commit, and evaluates its patch with the pinned official Docker harness. The optimizer changes only allowlisted prompts and tool descriptions. Your existing agent retains its runtime, tools, permissions, and accounting.
 
 ```text
 benchmarks/

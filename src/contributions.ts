@@ -3,6 +3,8 @@ import { assert, canonical, clone, hash, integer, micros, record, text, validate
 import { analyzeEvidence, type ReviewEvidence } from './evidence.js';
 import { createConfigurationPatch, type ConfigurationPatch } from './patch.js';
 import { validateStructure } from './structure.js';
+import { chooseCandidate, isSelectionImprovement, normalizeSelectionPolicy, summarizeCandidates } from './selection.js';
+import { normalizeExperienceSettings } from './experience.js';
 
 export interface SubmissionMetadata { id: string; summary: string; reviewed: boolean }
 export interface SubmissionEvaluation {
@@ -65,8 +67,10 @@ export function buildSubmission(result: OptimizationResult<unknown>, metadata: S
   const submission: Submission = {
     version: 1, metadata: { id: metadata.id, summary: metadata.summary, reviewed: metadata.reviewed }, digest: '',
     baselineId: result.candidates[0]!.id, selectedId: result.selectedId, components: clone(result.components), changes: clone(result.changes),
-    candidates: result.candidates.map(c => ({ id: c.id, components: clone(c.components), trainAccuracy: c.trainAccuracy!, validationAccuracy: c.validationAccuracy! })),
-    history: result.history.map(h => ({ attempt: h.attempt, status: h.status, ...(h.candidateId === undefined ? {} : { candidateId: h.candidateId }), ...(h.reason === undefined ? {} : { reason: h.reason }) })),
+    candidates: result.candidates.map(c => ({ id: c.id, components: clone(c.components), trainAccuracy: c.trainAccuracy!, validationAccuracy: c.validationAccuracy!, ...(c.lineage ? { lineage: clone(c.lineage) } : {}) })),
+    history: result.history.map(h => ({ attempt: h.attempt, status: h.status, ...(h.candidateId === undefined ? {} : { candidateId: h.candidateId }), ...(h.reason === undefined ? {} : { reason: h.reason }),
+      ...(h.parentId === undefined ? {} : { parentId: h.parentId }), ...(h.proposalId === undefined ? {} : { proposalId: h.proposalId }),
+      ...(h.changedKeys === undefined ? {} : { changedKeys: clone(h.changedKeys) }), ...(h.operator === undefined ? {} : { operator: h.operator }) })),
     evaluations: result.evaluations.map(e => ({ id: e.id, candidateId: e.candidateId, caseId: e.caseId, split: e.split, passed: e.passed, outputHash: hash(e.output), usage: e.usage.map(cleanReceipt) })),
     test: { kind: result.test.kind, baselineAccuracy: result.test.baselineAccuracy, candidateAccuracy: result.test.candidateAccuracy },
     accounting: { currency: result.accounting.currency, limitMicros: result.accounting.limitMicros, occupiedMicros: result.accounting.occupiedMicros,
@@ -95,14 +99,16 @@ export function validateSubmission(value: unknown): SubmissionValidation {
   assert(Array.isArray(s.candidates) && s.candidates.length > 0, 'Missing candidates');
   const candidates = new Map<string, Candidate>();
   for (const c of s.candidates) {
-    keys(c, ['id', 'components', 'trainAccuracy', 'validationAccuracy']); components(c.components); checkedHash(c.id);
+    keys(c, ['id', 'components', 'trainAccuracy', 'validationAccuracy'], ['lineage']); components(c.components); checkedHash(c.id);
     assert(c.id === hash(c.components) && !candidates.has(c.id), 'Invalid or duplicate candidate identity');
     score(c.trainAccuracy); score(c.validationAccuracy); candidates.set(c.id, c);
   }
   const baseline = candidates.get(s.baselineId), winner = candidates.get(s.selectedId);
   assert(baseline && winner && s.baselineId === s.candidates[0]!.id, 'Missing baseline or selected candidate');
   if (s.configuration !== undefined) {
-    keys(s.configuration, ['mutable'], ['structure']);
+    keys(s.configuration, ['mutable'], ['structure','selection','experience']);
+    if (s.configuration.selection !== undefined) assert(canonical(s.configuration.selection) === canonical(normalizeSelectionPolicy(s.configuration.selection)), 'Invalid exported selection policy');
+    if (s.configuration.experience !== undefined) assert(canonical(s.configuration.experience) === canonical(normalizeExperienceSettings(s.configuration.experience)), 'Invalid exported experience settings');
     validateStructure({ components: baseline.components, ...s.configuration });
     for (const c of s.candidates) for (const key of Object.keys(c.components)) if (c.components[key] !== baseline.components[key]) {
       const spec = s.configuration.mutable[key];
@@ -117,7 +123,7 @@ export function validateSubmission(value: unknown): SubmissionValidation {
   assert(Array.isArray(s.history), 'Missing candidate history');
   const historicalCandidates = new Set<string>();
   for (const [i, h] of s.history.entries()) {
-    keys(h, ['attempt', 'status'], ['candidateId', 'reason']); assert(h.attempt === i + 1, 'Proposal history must be contiguous');
+    keys(h, ['attempt', 'status'], ['candidateId', 'reason','parentId','proposalId','changedKeys','operator']); assert(h.attempt === i + 1, 'Proposal history must be contiguous');
     assert(h.status === 'evaluated' || h.status === 'rejected', 'Invalid proposal status');
     if (h.reason !== undefined) text(h.reason);
     if (h.status === 'evaluated') {
@@ -158,6 +164,37 @@ export function validateSubmission(value: unknown): SubmissionValidation {
   }
   for (const e of entries.values()) assert(e.purpose === 'proposal' || evalIds.has(e.id) || (e.chargedMicros === 0 && e.receipts!.length === 0 && e.purpose.startsWith('eval:')), 'Unmatched paid evaluation ledger entry');
   assert(s.accounting.entries.filter(e => e.purpose === 'proposal').length >= s.history.length, 'Proposal accounting is incomplete');
+  const prior = new Set([baseline.id]), usedProposals = new Set<string>();
+  const invocationOrder = new Map(s.accounting.entries.map((entry, index) => [entry.id, index]));
+  let lastProposalIndex = -1;
+  assert(baseline.lineage === undefined, 'Baseline cannot have proposal lineage');
+  for (const h of s.history) {
+    const hasLineage = [h.parentId, h.proposalId, h.changedKeys, h.operator].some(value => value !== undefined);
+    if (s.configuration?.experience !== undefined) assert(hasLineage, 'Missing proposal lineage');
+    if (hasLineage) {
+      assert(typeof h.parentId === 'string' && prior.has(h.parentId), 'Lineage parent must be an earlier candidate');
+      assert(typeof h.proposalId === 'string' && entries.get(h.proposalId)?.purpose === 'proposal' && !usedProposals.has(h.proposalId), 'Lineage proposal does not match a unique ledger invocation');
+      const proposalIndex = invocationOrder.get(h.proposalId)!;
+      assert(proposalIndex > lastProposalIndex, 'Proposal lineage differs from invocation order'); lastProposalIndex = proposalIndex;
+      for (const evaluation of s.evaluations.filter(row => row.candidateId === h.parentId && row.split !== 'test')) {
+        assert(invocationOrder.get(evaluation.id)! < proposalIndex, 'Proposal precedes its parent evaluation');
+      }
+      usedProposals.add(h.proposalId);
+      assert(h.operator === 'proposer-text-patch' && Array.isArray(h.changedKeys) && h.changedKeys.every(key => typeof key === 'string')
+        && canonical(h.changedKeys) === canonical([...new Set(h.changedKeys)].sort()), 'Invalid lineage operator or changed keys');
+      if (h.status === 'evaluated') {
+        const candidate = candidates.get(h.candidateId!)!, parent = candidates.get(h.parentId)!;
+        const expected = { parentId: h.parentId, attempt: h.attempt, operator: h.operator, changedKeys: h.changedKeys, proposalId: h.proposalId };
+        assert(candidate.lineage && canonical(candidate.lineage) === canonical(expected), 'Candidate and proposal lineage differ');
+        for (const evaluation of s.evaluations.filter(row => row.candidateId === candidate.id && row.split !== 'test')) {
+          assert(invocationOrder.get(evaluation.id)! > proposalIndex, 'Candidate evaluation precedes its proposal');
+        }
+        const changed = Object.keys(parent.components).filter(key => parent.components[key] !== candidate.components[key]).sort();
+        assert(changed.length > 0 && canonical(changed) === canonical(h.changedKeys), 'Lineage edits differ from parent/child components');
+      }
+    } else if (h.status === 'evaluated') assert(candidates.get(h.candidateId!)!.lineage === undefined, 'Candidate lineage requires proposal history');
+    if (h.status === 'evaluated') prior.add(h.candidateId!);
+  }
   const rows = (id: string, split: string) => s.evaluations.filter(e => e.candidateId === id && e.split === split);
   const ids = (id: string, split: string) => rows(id, split).map(e => e.caseId).sort();
   const accuracy = (id: string, split: string) => { const r = rows(id, split); assert(r.length > 0, 'Evaluation partition missing'); return r.filter(e => e.passed).length / r.length; };
@@ -166,6 +203,24 @@ export function validateSubmission(value: unknown): SubmissionValidation {
     assert(c[split === 'train' ? 'trainAccuracy' : 'validationAccuracy'] === accuracy(c.id, split), 'Candidate accuracy disagrees with per-case evidence');
   }
   assert(winner.validationAccuracy! >= baseline.validationAccuracy!, 'Selected candidate degraded validation');
+  const selection = normalizeSelectionPolicy(s.configuration?.selection);
+  const summaries = summarizeCandidates(s.candidates, s.evaluations, s.accounting.entries, baseline.id);
+  const baselineSummary = summaries.find(candidate => candidate.id === baseline.id)!, winnerSummary = summaries.find(candidate => candidate.id === winner.id)!;
+  if (selection.kind === 'quality-constrained-resource') {
+    let incumbentId = baseline.id;
+    const completed = new Set([baseline.id]);
+    for (const h of s.history) {
+      assert(h.parentId === incumbentId, 'Proposal parent differs from the selection policy incumbent');
+      if (h.status === 'evaluated') {
+        completed.add(h.candidateId!);
+        incumbentId = chooseCandidate(selection, summaries.filter(candidate => completed.has(candidate.id)), incumbentId, baseline.id);
+      }
+    }
+    assert(incumbentId === winner.id, 'Selected candidate differs from replayed selection policy');
+  }
+  if (baseline.id !== winner.id) {
+    assert(isSelectionImprovement(selection, winnerSummary, baselineSummary, baselineSummary), 'Selected candidate violates its selection policy');
+  }
   keys(s.test, ['kind', 'baselineAccuracy', 'candidateAccuracy']);
   assert(s.test.kind === (baseline.id === winner.id ? 'identity-control' : 'paired'), 'Incorrect comparison kind');
   assert(canonical(ids(baseline.id, 'test')) === canonical(ids(winner.id, 'test')), 'Test arms are not paired');
@@ -176,10 +231,16 @@ export function validateSubmission(value: unknown): SubmissionValidation {
   const review = analyzeEvidence({ ...s, status: 'completed' });
   if (s.review !== undefined) assert(canonical(s.review) === canonical(review), 'Review statistics differ from per-case/ledger evidence');
   const observedPaidTarget = [...baselineTest, ...winnerTest].every(e => e.usage.some(r => r.inputTokens + r.outputTokens > 0 || (r.extraCostUSD ?? 0) > 0));
-  const eligibleForPromotion = !s.provenance.synthetic && observedPaidTarget && baseline.id !== winner.id && winner.validationAccuracy! > baseline.validationAccuracy! && candidateTestAccuracy >= baselineTestAccuracy && noRegressions;
+  const validationImproved = isSelectionImprovement(selection, winnerSummary, baselineSummary, baselineSummary);
+  const metricImproved = selection.kind === 'accuracy' || candidateTestAccuracy > baselineTestAccuracy || (candidateTestAccuracy === baselineTestAccuracy
+    && (selection.metric === 'usd' ? review.costs.candidateTest.totalMicros < review.costs.baselineTest.totalMicros
+      : winnerTest.reduce((sum, e) => sum + e.usage.reduce((n, r) => n + r.inputTokens + r.outputTokens, 0), 0)
+        < baselineTest.reduce((sum, e) => sum + e.usage.reduce((n, r) => n + r.inputTokens + r.outputTokens, 0), 0)));
+  const eligibleForPromotion = !s.provenance.synthetic && observedPaidTarget && baseline.id !== winner.id && validationImproved && metricImproved && candidateTestAccuracy >= baselineTestAccuracy && noRegressions;
   const limitations = ['Integrity checks do not authenticate results or provider invoices; maintainers must reproduce the experiment.', 'Tariff enforcement requires the pinned experiment configuration.', 'Promotion eligibility checks accounting and regression rules; it is not a statistical significance claim.', ...review.limitations];
   if (s.provenance.synthetic || !observedPaidTarget) limitations.push('Synthetic or unmetered target evidence cannot establish a real-agent improvement.');
   if (!noRegressions) limitations.push('The candidate regressed on at least one baseline-passing test case.');
+  if (!metricImproved) limitations.push('The frozen candidate did not demonstrate an improvement under the configured resource policy on held-out cases.');
   return { id: s.metadata.id, digest: s.digest, synthetic: s.provenance.synthetic, eligibleForPromotion,
     baselineValidationAccuracy: baseline.validationAccuracy!, candidateValidationAccuracy: winner.validationAccuracy!, baselineTestAccuracy, candidateTestAccuracy,
     evaluationCount: s.evaluations.length, spentMicros: total, limitations, review };

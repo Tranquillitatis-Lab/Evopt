@@ -15,3 +15,6 @@ export { createConfigurationPatch, applyConfigurationPatch, validateConfiguratio
 export type { ConfigurationPatch, ConfigurationEdit } from './patch.js';
 export { mapOpenAIChatConfiguration, mapAnthropicConfiguration } from './adapters.js';
 export type { OpenAIChatConfiguration, AnthropicConfiguration } from './adapters.js';
+export { chooseCandidate, isSelectionImprovement, normalizeSelectionPolicy, summarizeCandidates } from './selection.js';
+export { buildTrainingExperience, normalizeExperienceSettings } from './experience.js';
+export type { ExperienceSettings, NormalizedExperienceSettings, CandidateLineage, TrainingExperience, TrainingObservation, TrainingExperienceInput, ExperienceEvaluation, ExperienceHistory } from './experience.js';

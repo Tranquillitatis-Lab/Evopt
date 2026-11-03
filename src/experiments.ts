@@ -100,9 +100,10 @@ export async function readExperimentResult(directory: string): Promise<Optimizat
     fingerprint: s.fingerprint, synthetic: s.config.agent.accounting.kind === 'free' && s.config.proposer.accounting.kind === 'free',
     ...(s.config.dataset.benchmark ? { benchmark: s.config.dataset.benchmark } : {}),
   }), 'Result and checkpoint provenance differ');
-  if (s.config.exportContract === 1) assert(result.configuration !== undefined, 'Result is missing its configuration contract');
+  if (s.config.exportContract === 1 || s.config.exportContract === 2) assert(result.configuration !== undefined, 'Result is missing its configuration contract');
   if (result.configuration !== undefined) assert(canonical(result.configuration) === canonical({ mutable: s.config.agent.mutable,
-    ...(s.config.agent.structure ? { structure: s.config.agent.structure } : {}) }), 'Result and checkpoint configuration differ');
+    ...(s.config.agent.structure ? { structure: s.config.agent.structure } : {}),
+    ...(s.config.selection ? { selection: s.config.selection } : {}), ...(s.config.experience ? { experience: s.config.experience } : {}) }), 'Result and checkpoint configuration differ');
   return result;
 }
 

@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { Accounting, Agent, BenchmarkProvenance, Components, OptimizeOptions, UsageReceipt } from './types.js';
 import { validateStructure } from './structure.js';
+import { normalizeSelectionPolicy } from './selection.js';
+import { normalizeExperienceSettings } from './experience.js';
 
 export function assert(value: unknown, message: string): asserts value { if (!value) throw new Error(message); }
 export function record(x: unknown): x is Record<string, unknown> {
@@ -77,6 +79,9 @@ export function validateAgent<I, O>(a: Agent<I, O>): void {
   assert(record(a.optimization), 'Missing optimization settings'); const p = a.optimization.proposer;
   assert(record(p) && typeof p.propose === 'function', 'Missing proposer'); text(p.id); text(p.version); validateAccounting(p.accounting);
   integer(a.optimization.maxAttempts ?? 10);
+  const selection = normalizeSelectionPolicy(a.optimization.selection);
+  normalizeExperienceSettings(a.optimization.experience);
+  assert(selection.kind === 'accuracy' || a.optimization.strategy === undefined, 'Custom strategy cannot be combined with resource selection');
   if (a.optimization.strategy) { text(a.optimization.strategy.id); text(a.optimization.strategy.version); assert(typeof a.optimization.strategy.select === 'function', 'Invalid strategy'); }
 }
 export function validateOptions<I, O>(o: OptimizeOptions<I, O>): void {

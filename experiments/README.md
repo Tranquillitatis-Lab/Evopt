@@ -27,7 +27,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for the free scaffold, explicit paid-r
 
 ## Benchmark experiments
 
-[SWE-bench](swe-bench/README.md) follows the OPS-GA workflow: import pinned instances, run your existing coding agent in a fresh repository checkout, and grade its patch with the official Docker harness. It supports the SWE-bench, Lite, and Verified dataset families through a compatible pinned evaluator. The optimizer changes only declared prompts and tool descriptions.
+[SWE-bench](swe-bench/README.md) imports pinned instances, runs your existing coding agent in a fresh repository checkout, and grades its patch with the official Docker harness. It supports the SWE-bench, Lite, and Verified dataset families through a compatible pinned evaluator. The optimizer changes only declared prompts and tool descriptions.
 
 SWE experiments use explicitly selected disjoint train/validation/test groups and carry benchmark provenance into contribution evidence. See [benchmark preparation](../benchmarks/README.md) before choosing a paid run budget and [the benchmark catalog research](../benchmarks/RESEARCH.md) for other software-engineering suites.
 

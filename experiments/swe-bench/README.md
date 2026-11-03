@@ -1,6 +1,6 @@
 # SWE-bench prompt and tool-description experiment
 
-This experiment follows back-ops-ga's SWE-bench workflow using your existing coding agent. Evopt proposes bounded changes to its declared prompts and tool descriptions. The agent works in a fresh base-commit checkout and returns a patch; the pinned official SWE-bench harness evaluates that patch in Docker. SWE-bench, SWE-bench Lite, and SWE-bench Verified share this integration.
+This experiment evaluates your existing coding agent on SWE-bench. Evopt proposes bounded changes to its declared prompts and tool descriptions. The agent works in a fresh base-commit checkout and returns a patch; the pinned official SWE-bench harness evaluates that patch in Docker. SWE-bench, SWE-bench Lite, and SWE-bench Verified share this integration.
 
 First follow [benchmark preparation and checks](../../benchmarks/README.md#prepare-swe-bench). Keep the complete dataset export private: it contains gold patches and hidden-test information needed by the evaluator, not the agent. Provision local repository snapshots, a reviewed official harness checkout, its Python dependencies, and Docker before starting a paid run.
 

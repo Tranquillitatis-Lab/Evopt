@@ -2,9 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { Accounting, Agent, Candidate, Components, Evaluation, InvocationResult, LedgerEntry, OptimizationResult, OptimizeOptions, Proposer, RunContext, SearchStrategy } from './types.js';
-import { applyPatch, assert, clone, freeze, hash, micros, price, validateAccounting, validateAgent, validateOptions } from './validation.js';
+import { applyPatch, assert, canonical, clone, freeze, hash, integer, micros, price, record, text, validateAccounting, validateAgent, validateOptions } from './validation.js';
 import { defaultRunDirectory, openStore } from './storage.js';
 import { proposalContext } from './structure.js';
+import { chooseCandidate, isSelectionImprovement, normalizeSelectionPolicy, summarizeCandidates } from './selection.js';
+import { buildTrainingExperience, normalizeExperienceSettings } from './experience.js';
 
 export function defineAgent<I, O>(agent: Agent<I, O>): Agent<I, O> { validateAgent(agent); return agent; }
 export function exactMatch<O>({ output, expected }: { output: O; expected: O }): boolean { return isDeepStrictEqual(output, expected); }
@@ -39,8 +41,10 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
   // Snapshot data/settings while retaining only explicitly supplied callbacks.
   const source = options.agent, d = options.dataset;
   const structure = proposalContext(source);
+  const selection = freeze(normalizeSelectionPolicy(source.optimization.selection));
+  const experience = freeze(normalizeExperienceSettings(source.optimization.experience));
   const agent: Agent<I, O> = { ...source, components: freeze(clone(source.components)), mutable: freeze(clone(source.mutable)), ...(structure ? { structure } : {}), accounting: freeze(clone(source.accounting)),
-    optimization: { ...source.optimization, proposer: { ...source.optimization.proposer, accounting: freeze(clone(source.optimization.proposer.accounting)) } } };
+    optimization: { ...source.optimization, selection, experience, ...(source.optimization.strategy ? { strategy: { ...source.optimization.strategy } } : {}), proposer: { ...source.optimization.proposer, accounting: freeze(clone(source.optimization.proposer.accounting)) } } };
   const dataset = { ...d, train: clone(d.train), validation: clone(d.validation), test: clone(d.test) };
   const strategy = agent.optimization.strategy ?? accuracyStrategy;
   const cap = micros(options.budget, false), bound = validateAccounting(agent.accounting);
@@ -49,10 +53,10 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
   assert((dataset.train.length + dataset.validation.length) * bound + holdout <= cap, 'Budget cannot cover baseline and final test envelope');
   assert(!options.run?.resume || options.run.directory, 'Resume requires an explicit directory');
   const config = {
-    format: 1, engine: 'evopt-0.1.0', exportContract: 1, agent: { id: agent.id, version: agent.version, components: agent.components, mutable: agent.mutable, accounting: agent.accounting, ...(structure ? { structure } : {}) },
+    format: 1, engine: 'evopt-0.1.0', exportContract: 2, agent: { id: agent.id, version: agent.version, components: agent.components, mutable: agent.mutable, accounting: agent.accounting, ...(structure ? { structure } : {}) },
     dataset: { id: dataset.id, version: dataset.version, train: dataset.train, validation: dataset.validation, test: dataset.test, ...(dataset.benchmark ? { benchmark: clone(dataset.benchmark) } : {}) },
     proposer: { id: agent.optimization.proposer.id, version: agent.optimization.proposer.version, accounting: agent.optimization.proposer.accounting },
-    strategy: { id: strategy.id, version: strategy.version }, attempts: agent.optimization.maxAttempts ?? 10,
+    strategy: { id: agent.optimization.strategy?.id ?? (selection.kind === 'accuracy' ? strategy.id : `validation-accuracy-${selection.metric}`), version: agent.optimization.strategy?.version ?? '1' }, selection, experience, attempts: agent.optimization.maxAttempts ?? 10,
     objective: options.objective, cap, includeTraces: options.run?.includeTraces ?? false,
   };
   const fingerprint = hash(config), baseId = hash(agent.components);
@@ -63,6 +67,25 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
   try {
     assert(s.fingerprint === fingerprint, 'Run fingerprint mismatch; use a new directory');
     assert(!s.entries.some(e => e.status !== 'settled'), 'Unresolved billing or envelope violation; automatic resume refused');
+    const recordedIds = new Set<string>(), recordedReceipts = new Set<string>();
+    for (const entry of s.entries) {
+      assert(record(entry), 'Invalid recorded ledger entry'); text(entry.id); text(entry.purpose);
+      assert(!recordedIds.has(entry.id), 'Duplicate recorded invocation'); recordedIds.add(entry.id);
+      assert(entry.purpose === 'proposal' || entry.purpose.startsWith('eval:'), 'Unsupported recorded invocation purpose');
+      const accounting = entry.purpose === 'proposal' ? agent.optimization.proposer.accounting : agent.accounting;
+      integer(entry.reservedMicros); integer(entry.chargedMicros);
+      assert(entry.reservedMicros === validateAccounting(accounting) && entry.chargedMicros <= entry.reservedMicros, 'Recorded invocation envelope differs from its contract');
+      const receipts = entry.receipts ?? [];
+      assert(entry.chargedMicros === price(accounting, receipts), 'Recorded charge differs from pinned pricing and receipts');
+      for (const receipt of receipts) {
+        const key = canonical([receipt.provider, receipt.id]);
+        assert(!recordedReceipts.has(key), 'Receipt reused across recorded invocations'); recordedReceipts.add(key);
+      }
+      if (accounting.kind === 'paid') assert(receipts.reduce((sum, r) => sum + r.inputTokens, 0) <= accounting.limits.maxInputTokens
+        && receipts.reduce((sum, r) => sum + r.outputTokens, 0) <= accounting.limits.maxOutputTokens
+        && receipts.filter(r => r.inputTokens + r.outputTokens > 0).length <= accounting.limits.maxModelCalls, 'Recorded usage exceeds invocation limits');
+    }
+    integer(occupied(s.entries)); assert(occupied(s.entries) <= cap, 'Recorded charges exceed the run ceiling');
     assert(!Object.keys(s.unrecoverableCalls ?? {}).length, 'Invocation output could not be saved; automatic resume refused to avoid repeating completed work');
     const find = (id: string): Candidate => s.candidates.find(c => c.id === id)!;
     const remainingHoldout = (): number => s.phase === 'test'
@@ -97,8 +120,8 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
           throw new Stop('Free integration reported paid usage: token cost is unknown; known extra charges recorded');
         }
         const charged = price(accounting, result.usage.receipts);
-        const seenReceipts = new Set(s.entries.filter(e => e !== entry).flatMap(e => (e.receipts ?? []).map(r => `${r.provider}:${r.id}`)));
-        assert(!result.usage.receipts.some(r => seenReceipts.has(`${r.provider}:${r.id}`)), 'Receipt reused across invocations');
+        const seenReceipts = new Set(s.entries.filter(e => e !== entry).flatMap(e => (e.receipts ?? []).map(r => canonical([r.provider, r.id]))));
+        assert(!result.usage.receipts.some(r => seenReceipts.has(canonical([r.provider, r.id]))), 'Receipt reused across invocations');
         entry.chargedMicros = charged; entry.receipts = clone(result.usage.receipts);
         const exceedsLimits = accounting.kind === 'paid' && (
           result.usage.receipts.reduce((n,r) => n + r.inputTokens, 0) > accounting.limits.maxInputTokens ||
@@ -181,25 +204,32 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
               const c = dataset.train.find(c => c.id === e.caseId)!;
               return { caseId: c.id, input: clone(c.input), expected: clone(c.expected), output: clone(e.output), passed: e.passed };
             });
+            const learned = buildTrainingExperience({ candidates: s.candidates, evaluations: s.evaluations, entries: s.entries, history: s.history,
+              baselineId: baseId, incumbentId: incumbent.id, mutable: agent.mutable, settings: experience });
             const proposed = await invoke(`proposal:${attempt}`, 'proposal', agent.optimization.proposer.accounting, context => agent.optimization.proposer.propose({
-              components: freeze(Object.fromEntries(Object.keys(agent.mutable).map(k => [k, incumbent.components[k]!]))), mutable: agent.mutable, feedback, attempt, ...(structure ? { structure } : {}),
+              components: freeze(Object.fromEntries(Object.keys(agent.mutable).map(k => [k, incumbent.components[k]!]))), mutable: agent.mutable, feedback, attempt, ...(structure ? { structure } : {}), experience: learned, selection,
             }, context));
+            const proposalId = s.entries.findLast(entry => entry.purpose === 'proposal')!.id;
+            const requestedKeys = record(proposed.output) ? Object.keys(proposed.output).sort() : [];
             try {
               const components = applyPatch(incumbent.components, agent.mutable, proposed.output), id = hash(components);
               if (s.candidates.some(c => c.id === id)) throw new Error('Duplicate candidate');
-              s.candidates.push({ id, components }); s.active = { attempt, candidateId: id }; await store.save();
+              const changedKeys = Object.keys(agent.mutable).filter(key => components[key] !== incumbent.components[key]).sort();
+              s.candidates.push({ id, components, lineage: { parentId: incumbent.id, attempt, operator: 'proposer-text-patch', changedKeys, proposalId } }); s.active = { attempt, candidateId: id }; await store.save();
             } catch (e) {
-              s.history.push({ attempt, status: 'rejected', reason: message(e) }); s.nextAttempt++; await store.save(); continue;
+              s.history.push({ attempt, status: 'rejected', reason: message(e), parentId: incumbent.id, proposalId, changedKeys: requestedKeys, operator: 'proposer-text-patch' }); s.nextAttempt++; await store.save(); continue;
             }
           }
           const active = s.active!;
           await evaluate(active.candidateId, 'train'); await evaluate(active.candidateId, 'validation');
-          const eligible = s.candidates.filter(c => c.trainAccuracy !== undefined && c.validationAccuracy !== undefined).map(c => ({ id: c.id, trainAccuracy: c.trainAccuracy!, validationAccuracy: c.validationAccuracy! }));
-          const selected = strategy.select(freeze(clone(eligible)), s.selectedId);
+          const eligible = summarizeCandidates(s.candidates, s.evaluations, s.entries, baseId);
+          const selected = agent.optimization.strategy
+            ? strategy.select(freeze(clone(eligible)), s.selectedId)
+            : chooseCandidate(selection, eligible, s.selectedId, baseId);
           assert(eligible.some(c => c.id === selected), 'Strategy selected an unevaluated candidate');
           assert(find(selected).validationAccuracy! >= find(s.selectedId).validationAccuracy!, 'Strategy degraded validation accuracy');
-          if (find(selected).validationAccuracy! > find(s.selectedId).validationAccuracy!) s.selectedId = selected;
-          s.history.push({ attempt: active.attempt, status: 'evaluated', candidateId: active.candidateId });
+          if (isSelectionImprovement(selection, eligible.find(c => c.id === selected)!, eligible.find(c => c.id === s.selectedId)!, eligible.find(c => c.id === baseId)!)) s.selectedId = selected;
+          s.history.push({ ...find(active.candidateId).lineage!, attempt: active.attempt, status: 'evaluated', candidateId: active.candidateId });
           s.nextAttempt++; delete s.active; await store.save();
         }
         s.phase = 'test';
@@ -217,7 +247,7 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
       components: selected.components, selectedId: selected.id,
       changes: Object.fromEntries(Object.keys(agent.mutable).filter(k => selected.components[k] !== agent.components[k]).map(k => [k, { before: agent.components[k]!, after: selected.components[k]! }])),
       candidates: s.candidates, history: s.history, evaluations: s.evaluations,
-      configuration: { mutable: agent.mutable, ...(structure ? { structure } : {}) },
+      configuration: { mutable: agent.mutable, ...(structure ? { structure } : {}), selection, experience },
       ...(s.phase === 'completed' ? { test: { kind: s.selectedId === baseId ? 'identity-control' : 'paired', baselineAccuracy: testAccuracy(baseId), candidateAccuracy: testAccuracy(s.selectedId) } } : {}),
       accounting: { currency: 'USD', limitMicros: cap, occupiedMicros: occupied(s.entries), entries: s.entries },
       provenance: { agentId: agent.id, agentVersion: agent.version, datasetId: dataset.id, datasetVersion: dataset.version, fingerprint, synthetic: agent.accounting.kind === 'free' && agent.optimization.proposer.accounting.kind === 'free', ...(config.dataset.benchmark ? { benchmark: config.dataset.benchmark } : {}) },

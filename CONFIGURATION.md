@@ -53,7 +53,41 @@ Pass these fields to `defineAgent`, together with its identity/version, fresh `r
 
 Every mutable field in a structured declaration needs the correct kind and target. Validation rejects missing owners, duplicate ownership, unknown tool/handoff references, callbacks in metadata, and invalid text limits before invocation. Existing flat adapters remain usable.
 
-The proposer receives mutable text, training feedback, and a frozen snapshot of public roles/contracts/topology. Immutable prompts appear as key references without their contents. OpenAI, Anthropic, and Gemini proposers include that structure in their requests. Validation and test labels stay outside proposals. The target still receives only its input, components, and run context.
+The proposer receives mutable text, training feedback, training experience, its selection policy, and a frozen snapshot of public roles/contracts/topology. Immutable prompts appear as key references without their contents. OpenAI, Anthropic, and Gemini proposers include this context in their requests. Validation and test labels stay outside proposals. The target still receives only its input, components, and run context.
+
+## Selection and training experience
+
+Set the policy in `agent.optimization`; the four-property `optimize` call stays unchanged. The default is `{ kind: "accuracy" }`, which keeps the incumbent on equal validation accuracy. A resource policy makes equal-quality savings eligible:
+
+```ts
+optimization: {
+  proposer, // Your explicitly configured, metered proposer.
+  maxAttempts: 10,
+  selection: {
+    kind: "quality-constrained-resource",
+    metric: "usd", // "tokens" is the other supported metric.
+    minValidationAccuracy: 0.9,
+    maxRegressions: 0,
+  },
+  experience: {
+    maxObservations: 12,
+    maxRejections: 5,
+    maxCharacters: 16000,
+  },
+}
+```
+
+For the resource policy, candidates must meet `minValidationAccuracy` and regress no more than `maxRegressions` cases that the original baseline passed on validation. Validation accuracy is still the first ranking criterion. At equal accuracy, only a strict reduction in the chosen resource replaces the incumbent; a higher-accuracy candidate can cost more. The regression guard counts individual cases, so solving another case does not cancel a regression. Test results never determine selection.
+
+The resource totals include all validation cases, including failures. `usd` uses the corresponding settled evaluation charges; `tokens` sums input and output tokens, with cached input and reasoning treated as subsets rather than added twice. This distinction matters when caching makes a longer invocation cheaper. Proposal costs remain in the total optimization-run budget, but are not attributed to a candidate's validation cost. A custom selection strategy cannot be combined with the resource policy; the configuration rejects that ambiguous combination before invocation.
+
+Each proposal receives `experience`, a deterministic projection of completed training evaluations across candidates and earlier proposal rejections. Observations include candidate/case identity, baseline and candidate outcomes, settled cost and token counts, changed mutable text, and available lineage. They contain no validation/test observations, task inputs, expected answers, or historical output bodies. Current-incumbent labeled training feedback remains a separate `feedback` field. The target agent receives neither field.
+
+The default limits are 12 observations, 5 rejection facts, and 16,000 serialized characters. `maxObservations` may be 0–100, `maxRejections` 0–25, and `maxCharacters` 512–128,000. Entries are bounded as whole records; omitted counts disclose truncation. These limits bound the experience projection, not the entire provider prompt: mutable components, current training feedback, and structure also consume context and must fit the configured accounting envelope.
+
+Each evaluated candidate records `lineage: { parentId, attempt, operator: "proposer-text-patch", changedKeys, proposalId }`. Proposal history retains the corresponding parent, invocation, and changed-field facts, including rejected attempts. The normalized selection and experience settings appear in `result.configuration` and participate in the run fingerprint. Matching-run resume preserves the recorded candidate, lineage, and settled invocations; changing settings requires a new run.
+
+This foundation learns from evidence within a run. It does not tune Evopt's own proposer prompt, create an autonomous baseline registry, repeat cases to measure model variance, or attest which framework tools an agent actually used. Those require additional experiments and implementation.
 
 ## Map to existing frameworks
 
@@ -74,6 +108,6 @@ Intervals assume independent, representative cases. One run per case cannot meas
 
 Costs use settled ledger charges matched to evaluation IDs. The review separates baseline/candidate held-out costs, proposals, other evaluations, and the total run. Cost per successful case includes failed-case costs and is `null` for zero successes. These are observed costs under pinned prices, not future production costs or local Docker expenses.
 
-Contribution export includes the recomputable review, configuration contract, and patch. Validation recomputes statistics and edits from per-case evidence and the ledger. Preserve experiment definitions, source hashes, evaluator pins, environment versions, and private reports for reproduction. Report regression IDs and rerun those cases for later configurations. Exported statistics and hashes do not authenticate results.
+Contribution export includes the recomputable review, configuration contract, selection policy, lineage, and patch. Validation reconstructs selection and checks lineage against proposal history and settled invocations, in addition to recomputing statistics and edits from per-case evidence and the ledger. Recalculating an artifact's digest does not make contradictory evidence valid. Preserve experiment definitions, source hashes, evaluator pins, environment versions, and private reports for reproduction. Report regression IDs and rerun those cases for later configurations. Exported statistics and hashes do not authenticate results.
 
 `createConfigurationPatch(result)` creates portable JSON containing changed text and its role/target. `applyConfigurationPatch(agent, patch)` checks identity/version, baseline, allowlist and structure hashes, before-values, and lengths, then returns new components for explicit adoption. Older artifacts without the original configuration contract can be analyzed but cannot produce a guarded patch.

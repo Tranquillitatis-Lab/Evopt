@@ -2,7 +2,7 @@
 
 Contributors can spend their own explicitly approved token budget to propose better prompts and tool descriptions, then submit the resulting configuration and evidence for review. An accepted improvement becomes a versioned starting point for a later experiment. Evopt never installs a candidate or changes production agents automatically.
 
-The workflow follows OPS-GA's useful separation between experiments, private run evidence, and reviewed contributions. It uses Evopt's general-agent adapter and USD accounting contract; no particular agent framework is required.
+Keep experiment definitions, private run evidence, and reviewed contributions separate. The workflow uses Evopt's general-agent adapter and USD accounting contract; no particular agent framework is required.
 
 Choose your contributor assistant and target provider using [INTEGRATIONS.md](INTEGRATIONS.md). These are separate choices: a Cursor or Claude Code brief guides the contributor workflow; a metered model API adapter runs inside the optimization budget. The integration listing distinguishes built-ins from SDKs that still need custom adapters.
 
@@ -21,7 +21,7 @@ npm run experiment -- status --run .evopt/runs/first-run
 
 The generated experiment uses a deterministic local agent and proposer. It spends zero and demonstrates the complete workflow. Its scores are synthetic evidence, not a benchmark result or a reason to change a shared default. `--budget 1` is a USD ceiling, not a number of iterations.
 
-`run` includes train/validation search and final held-out evaluation. `validate` below checks a submission file; it does not open a test partition or make provider calls. Use a fresh output directory for a new experiment. To resume, repeat the same `run` command, directory, budget, and paid authorization with `--resume`. Unknown billing blocks resume. After a process crash, both `experiment.lock` and `run.lock` may remain; verify their owners have stopped before removing stale locks, and never delete the ledger or journal. The library's explicit resume API is documented in the [README](README.md#durable-runs-and-recovery).
+`run` includes train/validation search and final held-out evaluation. `validate` below checks a submission file; it does not open a test partition or make provider calls. Use a fresh output directory for a new experiment. To resume, repeat the same `run` command, directory, budget, and paid authorization with `--resume`. Unknown billing blocks resume. After a process crash, both `experiment.lock` and `run.lock` may remain; verify their owners have stopped before removing stale locks, and never delete the ledger or journal. See the [API reference](API.md#durable-runs-and-recovery) for the library's explicit resume API.
 
 ## Bring an existing agent
 
@@ -29,14 +29,14 @@ Use [benchmarks/](benchmarks/README.md) for the SWE-bench importer, fresh reposi
 
 Prepare local source exports and repository snapshots, provision the official harness and Docker, then run benchmark preparation and evaluator checks before authorizing paid optimization. Preserve the source revision, file hash, split manifest, evaluator revision, container/dependency details, and official reports with the experiment evidence. Local harness compute and storage are outside the inference USD ceiling. A successful configuration check does not prove that a Docker test run will succeed.
 
-An experiment module exports an object containing `id`, `description`, `agent`, `dataset`, and `objective: "accuracy"`. Configure `agent` with `defineAgent` as shown in the [adapter guide](README.md#adapt-an-existing-agent). Its mutable allowlist should contain only the specific prompt or tool-description fields being investigated.
+An experiment module exports an object containing `id`, `description`, `agent`, `dataset`, and `objective: "accuracy"`. Configure `agent` with `defineAgent` as shown in the [adapter guide](API.md#adapt-an-existing-agent). Its mutable allowlist should contain only the specific prompt or tool-description fields being investigated.
 
 For a reproducible experiment:
 
 - Pin the agent implementation, starting components, proposer, model settings, dataset revision, and scorer version. Explain the intended improvement before examining test results.
 - Declare disjoint train, validation, and test cases. Keep the scorer local and deterministic, and never pass labels to the target agent.
 - Create fresh agent state and isolated tool fixtures inside every invocation. Wire the supplied components into the agent's actual prompts and tool descriptions.
-- Account for every paid model call, retry, and paid tool operation. Review the constant invocation envelope, enforced limits, and pricing provenance against the [accounting contract](README.md#usd-accounting-contract).
+- Account for every paid model call, retry, and paid tool operation. Review the constant invocation envelope, enforced limits, and pricing provenance against the [accounting contract](API.md#usd-accounting-contract).
 
 Experiment modules and adapter callbacks are trusted application code. Loading a module executes its top-level code. Keep imports and module initialization free of provider calls, installations, and other side effects; put paid operations inside the metered runner or proposer callbacks. Read an unfamiliar experiment before running `check` or `run`.
 
@@ -89,4 +89,3 @@ Promotion is a separate human decision. If accepted, commit the reviewed configu
 
 Keep ordinary library fixes separate from optimization evidence. Model-proposed changes are limited to declared text components; tool implementations, permissions, graph topology, model weights, and arbitrary source code are outside the optimization scope. Do not publish this working package or claim name clearance.
 
-Use your own Git identity. Do not add AI attribution trailers or generated-by footers to commits, pull requests, issues, or comments. Human co-authors and sign-offs remain unchanged.

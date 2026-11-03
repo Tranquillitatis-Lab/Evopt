@@ -41,7 +41,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   return { root, repository, options };
 }
 
-test('SWE CLI prepares the OPS-GA-style split manifest without reference solutions', async t => {
+test('SWE CLI prepares disjoint split manifests without reference solutions', async t => {
   const f = await fixture(t), splits = join(f.root, 'splits.json'), manifest = join(f.root, 'manifest.json');
   await writeFile(splits, JSON.stringify(groups));
   const args = ['prepare', '--benchmark', 'swe-bench', '--source', f.options.sourceFile, '--sha256', f.options.sourceSha256,

@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAnthropicProposer, createAnthropicTextRunner, type AnthropicProposerOptions } from '../src/anthropic.js';
-import { price } from '../src/validation.js';
+import { price, canonical } from '../src/validation.js';
+import { buildTrainingExperience } from '../src/experience.js';
+import { normalizeSelectionPolicy } from '../src/selection.js';
 
 const options: AnthropicProposerOptions = {
   apiKey: 'mock-only-key', model: 'mock-claude',
@@ -16,11 +18,23 @@ const response = (content = '{"prompt":"improved"}', rest = {}) => new Response(
 }), { status: 200 });
 
 test('Anthropic proposer sends explicit bounded Messages requests and normalizes cache usage', async () => {
-  let calls = 0;
+  let calls = 0, requestBytes = 0;
   const structuredRequest = { ...request, components: { ...request.components, lookupDescription: 'PRIVATE-TOOL-TEXT' },
     mutable: { prompt: { ...request.mutable.prompt, kind: 'prompt' as const, target: { type: 'node' as const, id: 'planner' } } },
     structure: { version: 1 as const, nodes: [{ id: 'planner', role: 'Retrieve verified records', promptKeys: ['prompt', 'immutableSecret'], toolIds: ['lookup'] }],
       tools: [{ id: 'lookup', descriptionKey: 'lookupDescription', inputSchema: { type: 'object', properties: { query: { type: 'string' } } }, constraints: ['Read-only'] }], handoffs: [] } };
+  const experience = buildTrainingExperience({
+    candidates: [{ id: 'baseline', components: structuredRequest.components }, { id: 'earlier', components: { ...structuredRequest.components, prompt: 'Earlier draft: café 数据' } }],
+    evaluations: [{ id: 'baseline-eval', candidateId: 'baseline', caseId: 'train-1', split: 'train', passed: true, usage: [] },
+      { id: 'earlier-eval', candidateId: 'earlier', caseId: 'train-1', split: 'train', passed: false, usage: [] }],
+    entries: [{ id: 'baseline-eval', purpose: 'eval:baseline:train:train-1', status: 'settled', reservedMicros: 0, chargedMicros: 0, receipts: [] },
+      { id: 'earlier-eval', purpose: 'eval:earlier:train:train-1', status: 'settled', reservedMicros: 0, chargedMicros: 0, receipts: [] }],
+    history: [{ attempt: 1, status: 'evaluated', candidateId: 'earlier', parentId: 'baseline', proposalId: 'proposal-1', changedKeys: ['prompt'], operator: 'proposer-text-patch' },
+      { attempt: 2, status: 'rejected', reason: 'Invalid or oversized component' }],
+    baselineId: 'baseline', incumbentId: 'baseline', mutable: structuredRequest.mutable, settings: { maxCharacters: 2048 },
+  });
+  const selection = normalizeSelectionPolicy({ kind: 'quality-constrained-resource', metric: 'usd', minValidationAccuracy: 0.9, maxRegressions: 0 });
+  const learnedRequest = { ...structuredRequest, attempt: 3, experience, selection };
   const proposer = createAnthropicProposer({ ...options, fetch: async (url, init) => {
     calls++;
     assert.equal(url, 'https://api.anthropic.com/v1/messages');
@@ -28,6 +42,8 @@ test('Anthropic proposer sends explicit bounded Messages requests and normalizes
     assert.equal(headers.get('x-api-key'), options.apiKey);
     assert.equal(headers.get('anthropic-version'), '2026-10-21');
     assert.equal(init?.redirect, 'error'); assert.ok(init?.signal instanceof AbortSignal);
+    requestBytes = Buffer.byteLength(init?.body as string, 'utf8');
+    assert.ok(requestBytes + options.inputTokenOverhead <= options.maxInputTokens);
     const body = JSON.parse(init?.body as string);
     assert.equal(body.model, options.model); assert.equal(body.max_tokens, 100); assert.equal(body.stream, false);
     assert.equal(body.service_tier, 'standard_only'); assert.equal(body.inference_geo, 'global');
@@ -40,14 +56,22 @@ test('Anthropic proposer sends explicit bounded Messages requests and normalizes
     assert.deepEqual(payload.structure, structuredRequest.structure);
     assert.deepEqual(payload.components, { prompt: 'original' });
     assert.deepEqual(payload.mutable.prompt.target, { type: 'node', id: 'planner' });
+    assert.deepEqual(payload.experience, experience); assert.deepEqual(payload.selection, selection); assert.equal(payload.attempt, 3);
+    assert.ok(canonical(payload.experience).length <= experience.settings.maxCharacters);
     return response();
   } });
   assert.equal(calls, 0);
-  const result = await proposer.propose(structuredRequest, context());
+  const result = await proposer.propose(learnedRequest, context());
   assert.equal(calls, 1); assert.deepEqual(result.output, { prompt: 'improved' });
   assert.deepEqual(result.usage.receipts[0], { id: 'msg-1', provider: 'anthropic', model: 'mock-claude', inputTokens: 100, outputTokens: 20, cachedInputTokens: 40, reasoningTokens: 5 });
   assert.equal(price(proposer.accounting, result.usage.receipts), 104);
   assert.equal(JSON.stringify(proposer).includes(options.apiKey), false);
+  if (proposer.accounting.kind === 'paid') {
+    const bounded = createAnthropicProposer({ ...options, maxInputTokens: requestBytes + options.inputTokenOverhead - 1,
+      fetch: async () => { calls++; return response(); } });
+    await assert.rejects(bounded.propose(learnedRequest, context()), /before dispatch/);
+    assert.equal(calls, 1);
+  }
 });
 
 test('Anthropic text runner uses only its selected prompt and starts fresh messages each call', async () => {

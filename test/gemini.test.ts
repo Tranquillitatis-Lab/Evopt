@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGeminiProposer, createGeminiTextRunner } from '../src/gemini.js';
 import type { GeminiProposerOptions } from '../src/gemini.js';
-import { price, validateAccounting } from '../src/validation.js';
+import { price, validateAccounting, canonical } from '../src/validation.js';
+import { buildTrainingExperience } from '../src/experience.js';
+import { normalizeSelectionPolicy } from '../src/selection.js';
 
 const options: GeminiProposerOptions = {
   apiKey: 'test-only-placeholder', model: 'test-text-model',
@@ -22,16 +24,30 @@ const response = (content = '{"prompt":"improved"}', rest: Record<string, unknow
 }), { status: 200 });
 
 test('Gemini requests use stateless Interactions and account for cached input plus thinking', async () => {
-  let calls = 0;
+  let calls = 0, requestBytes = 0;
   const structuredRequest = { ...request, components: { ...request.components, lookupDescription: 'PRIVATE-TOOL-TEXT' },
     mutable: { prompt: { ...request.mutable.prompt, kind: 'prompt' as const, target: { type: 'node' as const, id: 'planner' } } },
     structure: { version: 1 as const, nodes: [{ id: 'planner', role: 'Retrieve verified records', promptKeys: ['prompt', 'secretImmutable'], toolIds: ['lookup'] }],
       tools: [{ id: 'lookup', descriptionKey: 'lookupDescription', inputSchema: { type: 'object', properties: { query: { type: 'string' } } }, constraints: ['Read-only'] }], handoffs: [] } };
+  const experience = buildTrainingExperience({
+    candidates: [{ id: 'baseline', components: structuredRequest.components }, { id: 'earlier', components: { ...structuredRequest.components, prompt: 'Earlier draft: café 数据' } }],
+    evaluations: [{ id: 'baseline-eval', candidateId: 'baseline', caseId: 'train-1', split: 'train', passed: true, usage: [] },
+      { id: 'earlier-eval', candidateId: 'earlier', caseId: 'train-1', split: 'train', passed: false, usage: [] }],
+    entries: [{ id: 'baseline-eval', purpose: 'eval:baseline:train:train-1', status: 'settled', reservedMicros: 0, chargedMicros: 0, receipts: [] },
+      { id: 'earlier-eval', purpose: 'eval:earlier:train:train-1', status: 'settled', reservedMicros: 0, chargedMicros: 0, receipts: [] }],
+    history: [{ attempt: 1, status: 'evaluated', candidateId: 'earlier', parentId: 'baseline', proposalId: 'proposal-1', changedKeys: ['prompt'], operator: 'proposer-text-patch' },
+      { attempt: 2, status: 'rejected', reason: 'Invalid or oversized component' }],
+    baselineId: 'baseline', incumbentId: 'baseline', mutable: structuredRequest.mutable, settings: { maxCharacters: 2048 },
+  });
+  const selection = normalizeSelectionPolicy({ kind: 'quality-constrained-resource', metric: 'usd', minValidationAccuracy: 0.9, maxRegressions: 0 });
+  const learnedRequest = { ...structuredRequest, attempt: 3, experience, selection };
   const proposer = createGeminiProposer({ ...options, fetch: async (url, init) => {
     calls++;
     assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/interactions');
     assert.equal(init?.redirect, 'error');
     assert.equal(init?.method, 'POST');
+    requestBytes = Buffer.byteLength(init?.body as string, 'utf8');
+    assert.ok(requestBytes + options.inputTokenOverhead <= options.maxInputTokens);
     const headers = new Headers(init?.headers);
     assert.equal(headers.get('x-goog-api-key'), options.apiKey);
     assert.equal(headers.get('Api-Revision'), '2026-05-20');
@@ -58,10 +74,12 @@ test('Gemini requests use stateless Interactions and account for cached input pl
     assert.deepEqual(payload.structure, structuredRequest.structure);
     assert.deepEqual(payload.components, { prompt: 'original' });
     assert.deepEqual(payload.mutable.prompt.target, { type: 'node', id: 'planner' });
+    assert.deepEqual(payload.experience, experience); assert.deepEqual(payload.selection, selection); assert.equal(payload.attempt, 3);
+    assert.ok(canonical(payload.experience).length <= experience.settings.maxCharacters);
     return response();
   } });
   assert.equal(calls, 0);
-  const result = await proposer.propose(structuredRequest, context());
+  const result = await proposer.propose(learnedRequest, context());
   assert.equal(calls, 1);
   assert.deepEqual(result.output, { prompt: 'improved' });
   assert.deepEqual(result.usage.receipts[0], {
@@ -70,6 +88,12 @@ test('Gemini requests use stateless Interactions and account for cached input pl
   assert.equal(validateAccounting(proposer.accounting), 10200);
   assert.equal(price(proposer.accounting, result.usage.receipts), 114);
   assert.equal(JSON.stringify(proposer).includes(options.apiKey), false);
+  if (proposer.accounting.kind === 'paid') {
+    const bounded = createGeminiProposer({ ...options, maxInputTokens: requestBytes + options.inputTokenOverhead - 1,
+      fetch: async () => { calls++; return response(); } });
+    await assert.rejects(bounded.propose(learnedRequest, context()), /before dispatch/);
+    assert.equal(calls, 1);
+  }
 });
 
 test('Gemini text evaluations use only their current input and configured prompt', async () => {
