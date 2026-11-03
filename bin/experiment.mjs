@@ -14,8 +14,8 @@ const help = `Evopt contributor experiments: bounded text optimization for any c
   onboard   --assistant <name> --out <brief.md>  Write an assistant-specific contributor brief
   init      --out <experiment.mjs> [--provider <name> --settings <private.json>]
                                              Create a scaffold; default offline, never inference
-  check     --config <experiment.mjs> [--budget <USD>]   Validate and show cost bounds
-  run       --config <experiment.mjs> --budget <USD> --out <run-dir> [--allow-paid] [--resume]
+  check     --config <experiment.mjs> [--budget <USD>] [--max-tokens <count>]   Validate and show bounds
+  run       --config <experiment.mjs> --budget <USD> --out <run-dir> [--max-tokens <count>] [--allow-paid] [--resume]
   status    --run <run-dir>                   Read checkpoint without loading an agent
   review    --run <run-dir>                   Paired uncertainty, costs, and regressions
   patch     --run <run-dir> --out <patch.json> --reviewed  Export guarded configuration edits
@@ -26,7 +26,7 @@ Config modules are trusted application code: imports must never perform inferenc
 Export --reviewed attests that the contributor reviewed the included text and identifiers.
 No command publishes, merges, installs, or changes a production configuration.`;
 const allowed = {
-  integrations: [], onboard: ['assistant','out'], init: ['out','provider','settings'], check: ['config','budget'], run: ['config','budget','out','allow-paid','resume'],
+  integrations: [], onboard: ['assistant','out'], init: ['out','provider','settings'], check: ['config','budget','max-tokens'], run: ['config','budget','out','max-tokens','allow-paid','resume'],
   status: ['run'], review: ['run'], patch: ['run','out','reviewed'], export: ['run','out','id','summary','reviewed'], validate: ['file'],
 };
 const flags = new Set(['allow-paid','resume','reviewed']);
@@ -43,6 +43,12 @@ function parse(command, args) {
   return options;
 }
 async function load(config) { return (await import(pathToFileURL(resolve(config)).href)).default; }
+function tokenLimit(options) {
+  if (options['max-tokens'] === undefined) return undefined;
+  const value = Number(options['max-tokens']);
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error('--max-tokens must be a positive safe integer');
+  return value;
+}
 function scaffold() {
   const entry = new URL('../dist/src/index.js', import.meta.url).href;
   return `// Trusted local configuration. Do not run inference at module import.
@@ -126,14 +132,19 @@ async function main() {
     const source = provider === 'offline' ? scaffold() : providerScaffold(provider, required(o, 'settings'));
     await writeNewFile(path, source); result = { config: resolve(path), provider, inferenceRun: false };
   }
-  if (command === 'check') result = checkExperiment(await load(required(o, 'config')), o.budget === undefined ? undefined : Number(o.budget));
+  if (command === 'check') {
+    const tokens = tokenLimit(o);
+    result = checkExperiment(await load(required(o, 'config')), o.budget === undefined ? undefined : Number(o.budget), tokens);
+  }
   if (command === 'run') {
     const config = required(o, 'config'), budget = Number(required(o, 'budget')), directory = required(o, 'out');
+    const tokens = tokenLimit(o);
     const controller = new AbortController(); const cancel = () => controller.abort();
     process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
     try {
-      const run = await runExperiment(await load(config), { budget, directory, allowPaid: o['allow-paid'], resume: o.resume, signal: controller.signal });
-      result = { status: run.status, reason: run.reason, directory: run.directory, test: run.test, occupiedMicros: run.accounting.occupiedMicros, synthetic: run.provenance.synthetic };
+      const run = await runExperiment(await load(config), { budget, directory, ...(tokens === undefined ? {} : { maxTokens: tokens }), allowPaid: o['allow-paid'], resume: o.resume, signal: controller.signal });
+      result = { status: run.status, reason: run.reason, directory: run.directory, test: run.test, occupiedMicros: run.accounting.occupiedMicros,
+        ...(run.accounting.maxTokens === undefined ? {} : { maxTokens: run.accounting.maxTokens, occupiedTokens: run.accounting.occupiedTokens }), synthetic: run.provenance.synthetic };
       if (run.status !== 'completed') process.exitCode = 2;
     } finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }
   }

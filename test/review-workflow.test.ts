@@ -83,7 +83,7 @@ test('offline run exports reproducible before/after evidence, small-sample uncer
   const f = await fixture(t), baseline = structuredClone(f.agent.components);
   assert.equal(f.calls(), 10);
   const restored = await readExperimentResult(f.directory);
-  assert.deepEqual(restored.configuration, { mutable: f.agent.mutable, structure: f.agent.structure, selection: { kind: 'accuracy' },
+  assert.deepEqual(restored.configuration, { mutable: f.agent.mutable, structure: f.agent.structure, objective: 'accuracy', selection: { kind: 'accuracy' },
     experience: { maxObservations: 12, maxRejections: 5, maxCharacters: 16000 } });
   const review = analyzeEvidence(restored), submission = buildSubmission(restored, metadata), checked = validateSubmission(submission);
   assert.deepEqual(submission.review, review); assert.deepEqual(checked.review, review);
@@ -171,7 +171,7 @@ test('read-only review and explicitly reviewed patch CLI commands use checkpoint
 test('new checkpoint export contract refuses stripped or changed configuration metadata', async t => {
   const f = await fixture(t), file = join(f.directory, 'result.json');
   const checkpoint = JSON.parse(await readFile(join(f.directory, 'state.json'), 'utf8'));
-  assert.equal(checkpoint.state.config.exportContract, 2);
+  assert.equal(checkpoint.state.config.exportContract, 3);
   const stripped = structuredClone(f.result); delete stripped.configuration;
   await writeFile(file, JSON.stringify(stripped));
   await assert.rejects(readExperimentResult(f.directory), /missing its configuration contract/);

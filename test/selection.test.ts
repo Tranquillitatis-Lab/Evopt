@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chooseCandidate, isSelectionImprovement, normalizeSelectionPolicy, summarizeCandidates } from '../src/selection.js';
+import { chooseCandidate, isSelectionImprovement, normalizeObjective, normalizeSelectionPolicy, resolveSelectionPolicy, summarizeCandidates } from '../src/selection.js';
 import { createOfflineProposer, defineAgent, optimize } from '../src/optimize.js';
-import type { Candidate, CandidateSummary, Dataset, Evaluation, LedgerEntry, SelectionPolicy } from '../src/types.js';
+import type { Candidate, CandidateSummary, Dataset, Evaluation, LedgerEntry, OptimizationObjective, SelectionPolicy } from '../src/types.js';
+import { validateOptions } from '../src/validation.js';
 
 const resource = (metric: 'usd' | 'tokens' = 'usd'): SelectionPolicy => ({ kind: 'quality-constrained-resource', metric, minValidationAccuracy: 0.5, maxRegressions: 0 });
 function fixture() {
@@ -34,15 +35,34 @@ function fixture() {
 
 test('selection policies normalize the accuracy default and reject malformed or unknown settings', () => {
   assert.deepEqual(normalizeSelectionPolicy(), { kind: 'accuracy' });
+  assert.deepEqual(normalizeSelectionPolicy(resource()), resource(), 'Legacy policies retain their serialized shape');
   assert.ok(Object.isFrozen(normalizeSelectionPolicy(resource())));
   for (const invalid of [null, {}, { kind: 'pareto' }, { kind: 'accuracy', metric: 'usd' }, { ...resource(), metric: 'latency' },
     { ...resource(), minValidationAccuracy: -1 }, { ...resource(), minValidationAccuracy: 1.01 }, { ...resource(), minValidationAccuracy: NaN },
-    { ...resource(), maxRegressions: -1 }, { ...resource(), maxRegressions: 0.5 }, { ...resource(), unexpected: true }]) {
+    { ...resource(), maxRegressions: -1 }, { ...resource(), maxRegressions: 0.5 }, { ...resource(), unexpected: true },
+    { ...resource(), ranking: 'quality' }, { ...resource(), ranking: undefined }]) {
     assert.throws(() => normalizeSelectionPolicy(invalid));
   }
   let accesses = 0;
   assert.throws(() => normalizeSelectionPolicy(Object.defineProperty({}, 'kind', { enumerable: true, get() { accesses++; return 'accuracy'; } })), /plain JSON/);
   assert.equal(accesses, 0);
+});
+
+test('new objectives default to resource-first tokens while explicit accuracy and legacy artifacts stay compatible', () => {
+  assert.equal(normalizeObjective(), 'tokens');
+  assert.equal(normalizeObjective('accuracy'), 'accuracy');
+  assert.deepEqual(resolveSelectionPolicy(normalizeObjective()), {
+    kind: 'quality-constrained-resource', metric: 'tokens', minValidationAccuracy: 0, maxRegressions: 0, ranking: 'resource-first',
+  });
+  assert.deepEqual(resolveSelectionPolicy('accuracy'), normalizeSelectionPolicy());
+  assert.deepEqual(resolveSelectionPolicy('accuracy', resource()), resource());
+  for (const invalid of [null, '', 'usd', 'token', {}, 1]) assert.throws(() => normalizeObjective(invalid), /Unsupported objective/);
+  for (const incompatible of [{ kind: 'accuracy' }, resource('usd'), resource('tokens'),
+    { ...resource('tokens'), ranking: 'accuracy-first' }, { ...resource('usd'), ranking: 'resource-first' }]) {
+    assert.throws(() => resolveSelectionPolicy('tokens', incompatible), /Tokens objective requires/);
+  }
+  const configured = { kind: 'quality-constrained-resource', metric: 'tokens', minValidationAccuracy: 0.8, maxRegressions: 1, ranking: 'resource-first' } as const;
+  assert.deepEqual(resolveSelectionPolicy('tokens', configured), configured);
 });
 
 test('summaries recompute paired validation outcomes, settled USD, and tokens without double-counting cache or reasoning', () => {
@@ -71,6 +91,30 @@ test('resource selection preserves accuracy priority and distinguishes cheaper c
   assert.equal(isSelectionImprovement(resource(), { ...incumbent, id: 'lower-quality', validationAccuracy: 0, validationCostMicros: 0 }, incumbent, baseline), false);
   assert.equal(isSelectionImprovement(resource(), { ...incumbent, id: 'same-usd-fewer-tokens', validationTokens: 0 }, incumbent, baseline), false);
   assert.equal(chooseCandidate(resource(), [baseline, { ...incumbent, id: 'tie' }, incumbent], incumbent.id, baseline.id), incumbent.id);
+});
+
+test('token objective requires fewer tokens instead of adopting more accurate but longer candidates', () => {
+  const source = fixture(), summaries = summarizeCandidates(source.candidates, source.evaluations, source.entries, 'baseline');
+  const policy = resolveSelectionPolicy('tokens');
+  assert.equal(chooseCandidate(policy, summaries, 'baseline', 'baseline'), 'shorter');
+  const baseline = summaries.find(candidate => candidate.id === 'baseline')!, quality = summaries.find(candidate => candidate.id === 'quality')!;
+  assert.equal(chooseCandidate(policy, [baseline, quality], baseline.id, baseline.id), baseline.id);
+  const tied = { ...quality, id: 'higher-accuracy-same-tokens', validationTokens: baseline.validationTokens };
+  assert.equal(chooseCandidate(policy, [baseline, tied], baseline.id, baseline.id), baseline.id);
+  assert.equal(chooseCandidate(resolveSelectionPolicy('accuracy'), [baseline, quality], baseline.id, baseline.id), quality.id);
+});
+
+test('resource-first ranking may trade incumbent gains for fewer tokens but preserves baseline quality and passing cases', () => {
+  const policy = resolveSelectionPolicy('tokens');
+  const baseline: CandidateSummary = { id: 'base', trainAccuracy: 1, validationAccuracy: 0.5, validationCostMicros: 100, validationTokens: 100, validationRegressions: 0 };
+  const incumbent = { ...baseline, id: 'incumbent', validationAccuracy: 1, validationTokens: 80 };
+  const shorter = { ...baseline, id: 'shorter', validationTokens: 40 };
+  assert.equal(chooseCandidate(policy, [baseline, incumbent, shorter], incumbent.id, baseline.id), shorter.id);
+  assert.equal(isSelectionImprovement(policy, shorter, incumbent, baseline), true);
+  assert.equal(isSelectionImprovement(policy, { ...shorter, validationAccuracy: 0.25 }, incumbent, baseline), false);
+  assert.equal(isSelectionImprovement(policy, { ...shorter, validationRegressions: 1 }, incumbent, baseline), false);
+  assert.equal(isSelectionImprovement(resolveSelectionPolicy('tokens', { ...policy, minValidationAccuracy: 0.75 }), shorter, incumbent, baseline), false);
+  assert.equal(isSelectionImprovement(resource('tokens'), shorter, incumbent, baseline), false, 'Legacy explicit policies remain accuracy-first');
 });
 
 test('quality floors retain baseline fallback and paired regressions constrain even aggregate accuracy improvements', () => {
@@ -116,5 +160,14 @@ test('invalid policies and ambiguous custom strategy fail preflight before any t
   await assert.rejects(optimize({ agent: { ...agent, optimization: { ...agent.optimization, selection: resource(), strategy: custom } }, dataset: data, objective: 'accuracy', budget: 10 }), /cannot be combined/);
   await assert.rejects(optimize({ agent: { ...agent, optimization: { ...agent.optimization, selection: { kind: 'accuracy', unknown: true } as SelectionPolicy } }, dataset: data, objective: 'accuracy', budget: 10 }), /selection policy fields/);
   assert.doesNotThrow(() => defineAgent({ ...agent, optimization: { ...agent.optimization, selection: { kind: 'accuracy' }, strategy: custom } }));
+  assert.doesNotThrow(() => validateOptions({ agent, dataset: data, budget: 10 }), 'Omitted objective is a valid token-optimization request');
+  for (const objective of [null, 'usd', '', 10]) {
+    await assert.rejects(optimize({ agent, dataset: data, objective: objective as OptimizationObjective, budget: 10 }), /Unsupported objective/);
+  }
+  for (const selection of [{ kind: 'accuracy' } as const, resource('usd'), resource('tokens'),
+    { ...resource('tokens'), ranking: 'accuracy-first' } as const]) {
+    await assert.rejects(optimize({ agent: { ...agent, optimization: { ...agent.optimization, selection } }, dataset: data, budget: 10 }), /Tokens objective requires/);
+  }
+  await assert.rejects(optimize({ agent: { ...agent, optimization: { ...agent.optimization, strategy: custom } }, dataset: data, budget: 10 }), /cannot be combined/);
   assert.equal(calls, 0);
 });

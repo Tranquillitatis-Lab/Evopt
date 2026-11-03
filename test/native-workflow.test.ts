@@ -83,7 +83,7 @@ test('four-property optimization uses native graph contracts for bounded edits a
   assert.match(result.history[0]!.reason!, /immutable/); assert.match(result.history[1]!.reason!, /oversized/);
   assert.equal(result.candidates.length, 2); assert.equal(proposals.length, 3); assert.equal(targetCalls, 6);
   assert.deepEqual(result.test, { kind: 'paired', baselineAccuracy: 0, candidateAccuracy: 1 });
-  assert.deepEqual(result.configuration, { mutable: original.mutable, structure: original.structure, selection: { kind: 'accuracy' },
+  assert.deepEqual(result.configuration, { mutable: original.mutable, structure: original.structure, objective: 'accuracy', selection: { kind: 'accuracy' },
     experience: { maxObservations: 12, maxRejections: 5, maxCharacters: 16000 } });
   assert.notDeepEqual(initial.structure, result.configuration!.structure);
   assert.equal(data.train[0]!.input.scratch.visits, 0);

@@ -54,6 +54,20 @@ test('completed paired paid evidence is eligible only after explicit review', as
   assert.ok(checked.limitations.some(v => v.includes('reproduce')));
 });
 
+test('older accuracy submissions retain their original review while validators derive token evidence', async t => {
+  const submission = buildSubmission(await fixture(t, { paid: true }), metadata);
+  delete submission.configuration!.objective;
+  const previousReview = { ...submission.review! } as Partial<NonNullable<Submission['review']>>;
+  delete previousReview.tokens;
+  previousReview.limitations = previousReview.limitations!.filter(value => !value.startsWith('The token interval descriptively resamples'));
+  submission.review = previousReview as NonNullable<Submission['review']>; rehash(submission);
+  const result = validateSubmission(submission);
+  assert.equal(result.eligibleForPromotion, true);
+  assert.equal(result.review.tokens.baselineTest, 4);
+  submission.review.delta.estimate = 0; rehash(submission);
+  assert.throws(() => validateSubmission(submission), /Review statistics differ/);
+});
+
 test('identity controls and test regressions are valid reports but cannot be promoted', async t => {
   const identity = buildSubmission(await fixture(t, { paid: true, improve: false }), metadata);
   assert.equal(identity.test.kind, 'identity-control'); assert.equal(validateSubmission(identity).eligibleForPromotion, false);

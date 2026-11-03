@@ -3,8 +3,9 @@ import { assert, canonical, clone, hash, integer, micros, record, text, validate
 import { analyzeEvidence, type ReviewEvidence } from './evidence.js';
 import { createConfigurationPatch, type ConfigurationPatch } from './patch.js';
 import { validateStructure } from './structure.js';
-import { chooseCandidate, isSelectionImprovement, normalizeSelectionPolicy, summarizeCandidates } from './selection.js';
+import { chooseCandidate, isSelectionImprovement, normalizeObjective, normalizeSelectionPolicy, resolveSelectionPolicy, summarizeCandidates } from './selection.js';
 import { normalizeExperienceSettings } from './experience.js';
+import { usageTokens } from './tokens.js';
 
 export interface SubmissionMetadata { id: string; summary: string; reviewed: boolean }
 export interface SubmissionEvaluation {
@@ -74,6 +75,7 @@ export function buildSubmission(result: OptimizationResult<unknown>, metadata: S
     evaluations: result.evaluations.map(e => ({ id: e.id, candidateId: e.candidateId, caseId: e.caseId, split: e.split, passed: e.passed, outputHash: hash(e.output), usage: e.usage.map(cleanReceipt) })),
     test: { kind: result.test.kind, baselineAccuracy: result.test.baselineAccuracy, candidateAccuracy: result.test.candidateAccuracy },
     accounting: { currency: result.accounting.currency, limitMicros: result.accounting.limitMicros, occupiedMicros: result.accounting.occupiedMicros,
+      ...(result.accounting.maxTokens === undefined ? {} : { maxTokens: result.accounting.maxTokens, occupiedTokens: result.accounting.occupiedTokens! }),
       entries: result.accounting.entries.map(e => ({ id: e.id, purpose: e.purpose, reservedMicros: e.reservedMicros, status: e.status,
         ...(e.chargedMicros === undefined ? {} : { chargedMicros: e.chargedMicros }), receipts: (e.receipts ?? []).map(cleanReceipt) })) },
     provenance: { agentId: p.agentId, agentVersion: p.agentVersion, datasetId: p.datasetId, datasetVersion: p.datasetVersion, fingerprint: p.fingerprint, synthetic: p.synthetic, ...(p.benchmark ? { benchmark: clone(p.benchmark) } : {}) },
@@ -106,7 +108,8 @@ export function validateSubmission(value: unknown): SubmissionValidation {
   const baseline = candidates.get(s.baselineId), winner = candidates.get(s.selectedId);
   assert(baseline && winner && s.baselineId === s.candidates[0]!.id, 'Missing baseline or selected candidate');
   if (s.configuration !== undefined) {
-    keys(s.configuration, ['mutable'], ['structure','selection','experience']);
+    keys(s.configuration, ['mutable'], ['structure','objective','selection','experience']);
+    if (s.configuration.objective !== undefined) normalizeObjective(s.configuration.objective);
     if (s.configuration.selection !== undefined) assert(canonical(s.configuration.selection) === canonical(normalizeSelectionPolicy(s.configuration.selection)), 'Invalid exported selection policy');
     if (s.configuration.experience !== undefined) assert(canonical(s.configuration.experience) === canonical(normalizeExperienceSettings(s.configuration.experience)), 'Invalid exported experience settings');
     validateStructure({ components: baseline.components, ...s.configuration });
@@ -131,7 +134,7 @@ export function validateSubmission(value: unknown): SubmissionValidation {
     } else assert(h.candidateId === undefined, 'Rejected proposal cannot be a selected candidate');
   }
   assert(historicalCandidates.size === candidates.size - 1, 'Candidate history is incomplete');
-  keys(s.accounting, ['currency', 'limitMicros', 'occupiedMicros', 'entries']);
+  keys(s.accounting, ['currency', 'limitMicros', 'occupiedMicros', 'entries'], ['maxTokens','occupiedTokens']);
   assert(s.accounting.currency === 'USD', 'Unsupported accounting currency'); integer(s.accounting.limitMicros, 1); integer(s.accounting.occupiedMicros);
   assert(Array.isArray(s.accounting.entries), 'Missing accounting ledger');
   const entries = new Map<string, LedgerEntry>(), receipts = new Set<string>(); let total = 0;
@@ -150,6 +153,11 @@ export function validateSubmission(value: unknown): SubmissionValidation {
     if (s.provenance.synthetic) assert(e.reservedMicros === 0 && e.chargedMicros === 0, 'Synthetic label contradicts paid invocation evidence');
   }
   assert(total === s.accounting.occupiedMicros && total <= s.accounting.limitMicros, 'Budget evidence does not reconcile');
+  if (s.accounting.maxTokens !== undefined) {
+    integer(s.accounting.maxTokens, 1); integer(s.accounting.occupiedTokens);
+    const tokens = s.accounting.entries.reduce((sum, entry) => sum + usageTokens(entry.receipts ?? []), 0); integer(tokens);
+    assert(s.accounting.occupiedTokens === tokens && tokens <= s.accounting.maxTokens, 'Token ceiling evidence does not reconcile');
+  } else assert(s.accounting.occupiedTokens === undefined, 'Token usage cap requires its declared ceiling');
   assert(Array.isArray(s.evaluations) && s.evaluations.length > 0, 'Missing evaluation evidence');
   const evalIds = new Set<string>(), identities = new Set<string>(), caseSplits = new Map<string, string>();
   for (const e of s.evaluations) {
@@ -203,7 +211,8 @@ export function validateSubmission(value: unknown): SubmissionValidation {
     assert(c[split === 'train' ? 'trainAccuracy' : 'validationAccuracy'] === accuracy(c.id, split), 'Candidate accuracy disagrees with per-case evidence');
   }
   assert(winner.validationAccuracy! >= baseline.validationAccuracy!, 'Selected candidate degraded validation');
-  const selection = normalizeSelectionPolicy(s.configuration?.selection);
+  const selection = s.configuration?.objective === undefined ? normalizeSelectionPolicy(s.configuration?.selection)
+    : resolveSelectionPolicy(normalizeObjective(s.configuration.objective), s.configuration.selection);
   const summaries = summarizeCandidates(s.candidates, s.evaluations, s.accounting.entries, baseline.id);
   const baselineSummary = summaries.find(candidate => candidate.id === baseline.id)!, winnerSummary = summaries.find(candidate => candidate.id === winner.id)!;
   if (selection.kind === 'quality-constrained-resource') {
@@ -229,18 +238,27 @@ export function validateSubmission(value: unknown): SubmissionValidation {
   const baselineTest = rows(baseline.id, 'test'), winnerTest = rows(winner.id, 'test');
   const noRegressions = baselineTest.every(b => !b.passed || winnerTest.find(w => w.caseId === b.caseId)!.passed);
   const review = analyzeEvidence({ ...s, status: 'completed' });
-  if (s.review !== undefined) assert(canonical(s.review) === canonical(review), 'Review statistics differ from per-case/ledger evidence');
+  if (s.review !== undefined) {
+    // Earlier version-one artifacts did not include token analysis; derive it for review.
+    const { tokens: _tokens, ...legacyReview } = review;
+    legacyReview.limitations = legacyReview.limitations.filter(value => !value.startsWith('The token interval descriptively resamples'));
+    const expected = s.review.tokens === undefined && s.configuration?.objective === undefined ? legacyReview : review;
+    assert(canonical(s.review) === canonical(expected), 'Review statistics differ from per-case/ledger evidence');
+  }
+  if (s.configuration?.objective === 'tokens') assert(s.review?.tokens !== undefined, 'Token optimization evidence requires token review');
   const observedPaidTarget = [...baselineTest, ...winnerTest].every(e => e.usage.some(r => r.inputTokens + r.outputTokens > 0 || (r.extraCostUSD ?? 0) > 0));
   const validationImproved = isSelectionImprovement(selection, winnerSummary, baselineSummary, baselineSummary);
-  const metricImproved = selection.kind === 'accuracy' || candidateTestAccuracy > baselineTestAccuracy || (candidateTestAccuracy === baselineTestAccuracy
-    && (selection.metric === 'usd' ? review.costs.candidateTest.totalMicros < review.costs.baselineTest.totalMicros
-      : winnerTest.reduce((sum, e) => sum + e.usage.reduce((n, r) => n + r.inputTokens + r.outputTokens, 0), 0)
-        < baselineTest.reduce((sum, e) => sum + e.usage.reduce((n, r) => n + r.inputTokens + r.outputTokens, 0), 0)));
-  const eligibleForPromotion = !s.provenance.synthetic && observedPaidTarget && baseline.id !== winner.id && validationImproved && metricImproved && candidateTestAccuracy >= baselineTestAccuracy && noRegressions;
+  const resourceImproved = selection.kind !== 'accuracy' && (selection.metric === 'usd'
+    ? review.costs.candidateTest.totalMicros < review.costs.baselineTest.totalMicros : review.tokens.candidateTest < review.tokens.baselineTest);
+  const metricImproved = selection.kind === 'accuracy' || (selection.ranking === 'resource-first' ? resourceImproved
+    : candidateTestAccuracy > baselineTestAccuracy || (candidateTestAccuracy === baselineTestAccuracy && resourceImproved));
+  const meaningfulBaseline = selection.kind === 'accuracy' || baselineTestAccuracy > 0;
+  const eligibleForPromotion = !s.provenance.synthetic && observedPaidTarget && baseline.id !== winner.id && validationImproved && metricImproved && meaningfulBaseline && candidateTestAccuracy >= baselineTestAccuracy && noRegressions;
   const limitations = ['Integrity checks do not authenticate results or provider invoices; maintainers must reproduce the experiment.', 'Tariff enforcement requires the pinned experiment configuration.', 'Promotion eligibility checks accounting and regression rules; it is not a statistical significance claim.', ...review.limitations];
   if (s.provenance.synthetic || !observedPaidTarget) limitations.push('Synthetic or unmetered target evidence cannot establish a real-agent improvement.');
   if (!noRegressions) limitations.push('The candidate regressed on at least one baseline-passing test case.');
   if (!metricImproved) limitations.push('The frozen candidate did not demonstrate an improvement under the configured resource policy on held-out cases.');
+  if (!meaningfulBaseline) limitations.push('An all-failed held-out baseline cannot establish useful resource savings.');
   return { id: s.metadata.id, digest: s.digest, synthetic: s.provenance.synthetic, eligibleForPromotion,
     baselineValidationAccuracy: baseline.validationAccuracy!, candidateValidationAccuracy: winner.validationAccuracy!, baselineTestAccuracy, candidateTestAccuracy,
     evaluationCount: s.evaluations.length, spentMicros: total, limitations, review };

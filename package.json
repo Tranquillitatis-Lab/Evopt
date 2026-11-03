@@ -8,7 +8,8 @@
     "test": "npm run build && node --test dist/test/*.test.js",
     "demo": "npm run build && node dist/examples/offline.js",
     "experiment": "npm run build && node bin/experiment.mjs",
-    "benchmark": "npm run build && node bin/benchmark.mjs"
+    "benchmark": "npm run build && node bin/benchmark.mjs",
+    "swe": "npm run build && node bin/swe.mjs"
   },
   "repository": {
     "type": "git",

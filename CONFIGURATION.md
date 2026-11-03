@@ -49,7 +49,7 @@ const configuration = {
 } satisfies AgentTextConfiguration;
 ```
 
-Pass these fields to `defineAgent`, together with its identity/version, fresh `run` callback, accounting envelope, and explicit proposer. `createSWEAgent` accepts the same fields and prepares a fresh base-commit workspace. The four-property `optimize({ agent, dataset, objective: "accuracy", budget })` call stays the same.
+Pass these fields to `defineAgent`, together with its identity/version, fresh `run` callback, accounting envelope, and explicit proposer. `createSWEAgent` accepts the same fields and prepares a fresh base-commit workspace. Use `optimize({ agent, dataset, budget })` for the default tokens objective, or explicitly pass `objective: "tokens"` or `"accuracy"`.
 
 Every mutable field in a structured declaration needs the correct kind and target. Validation rejects missing owners, duplicate ownership, unknown tool/handoff references, callbacks in metadata, and invalid text limits before invocation. Existing flat adapters remain usable.
 
@@ -57,7 +57,7 @@ The proposer receives mutable text, training feedback, training experience, its 
 
 ## Selection and training experience
 
-Set the policy in `agent.optimization`; the four-property `optimize` call stays unchanged. The default is `{ kind: "accuracy" }`, which keeps the incumbent on equal validation accuracy. A resource policy makes equal-quality savings eligible:
+The default objective is `"tokens"`: select strictly fewer validation tokens while maintaining at least baseline validation accuracy and allowing zero regressions on baseline-passing cases. The effective accuracy floor is the greater of baseline accuracy and the configured minimum. Set an optional policy in `agent.optimization` to require a stronger floor:
 
 ```ts
 optimization: {
@@ -65,7 +65,8 @@ optimization: {
   maxAttempts: 10,
   selection: {
     kind: "quality-constrained-resource",
-    metric: "usd", // "tokens" is the other supported metric.
+    metric: "tokens",
+    ranking: "resource-first",
     minValidationAccuracy: 0.9,
     maxRegressions: 0,
   },
@@ -77,9 +78,11 @@ optimization: {
 }
 ```
 
-For the resource policy, candidates must meet `minValidationAccuracy` and regress no more than `maxRegressions` cases that the original baseline passed on validation. Validation accuracy is still the first ranking criterion. At equal accuracy, only a strict reduction in the chosen resource replaces the incumbent; a higher-accuracy candidate can cost more. The regression guard counts individual cases, so solving another case does not cancel a regression. Test results never determine selection.
+Without an explicit policy, tokens mode uses the settings above with `minValidationAccuracy: 0`. The original baseline's accuracy still applies as a floor. A candidate must use strictly fewer tokens than the incumbent and meet the baseline-quality guards. More accuracy alone cannot win; equal-token candidates retain the incumbent. Resource-first selection may give up gains beyond baseline accuracy for fewer tokens, so inspect per-case results. The regression guard counts individual baseline-passing cases; solving another case does not cancel a regression. Test results never determine selection.
 
-The resource totals include all validation cases, including failures. `usd` uses the corresponding settled evaluation charges; `tokens` sums input and output tokens, with cached input and reasoning treated as subsets rather than added twice. This distinction matters when caching makes a longer invocation cheaper. Proposal costs remain in the total optimization-run budget, but are not attributed to a candidate's validation cost. A custom selection strategy cannot be combined with the resource policy; the configuration rejects that ambiguous combination before invocation.
+Explicit `objective: "accuracy"` keeps the earlier default `{ kind: "accuracy" }`: higher validation accuracy wins and ties retain the incumbent. In accuracy mode, an explicit `quality-constrained-resource` policy may use USD or tokens and either ranking. `ranking: "accuracy-first"` (also the meaning of an omitted ranking in an explicit policy) uses resource cost only to break accuracy ties; `"resource-first"` requires a strict resource reduction after quality guards. Tokens mode requires `metric: "tokens"` and `ranking: "resource-first"`; incompatible settings fail before invocation.
+
+The resource totals include all validation cases, including failures. `usd` uses the corresponding settled evaluation charges; `tokens` sums input and output tokens, with cached input and reasoning treated as subsets rather than added twice. This distinction matters when caching makes a longer invocation cheaper. Proposal costs remain in the total optimization-run budget, but are not attributed to a candidate's validation cost. A custom selection strategy is supported only with the accuracy objective and accuracy policy; incompatible combinations fail before invocation.
 
 Each proposal receives `experience`, a deterministic projection of completed training evaluations across candidates and earlier proposal rejections. Observations include candidate/case identity, baseline and candidate outcomes, settled cost and token counts, changed mutable text, and available lineage. They contain no validation/test observations, task inputs, expected answers, or historical output bodies. Current-incumbent labeled training feedback remains a separate `feedback` field. The target agent receives neither field.
 
@@ -103,6 +106,8 @@ npm run experiment -- patch --run .evopt/runs/swe-1 --out .evopt/swe-patch.json 
 ```
 
 `analyzeEvidence(result)` computes the same review in application code: paired held-out outcomes, improved/regressed case IDs, Wilson 95% intervals for each arm, a conservative paired Hoeffding 95% interval for the accuracy difference, and an exact two-sided McNemar test. An identity control reuses its observations once and has no independent comparison or significance result.
+
+The review's `tokens` section reports held-out totals, savings, per-case deltas, proposal usage, and total run usage. A per-case delta is candidate minus baseline: negative means fewer tokens. `deltaInterval95` is a descriptive interval for the mean per-case token delta, formed from 1,000 fixed-seed resamples of task pairs. It is `null` for an identity control or fewer than two pairs. It does not estimate model rerun variance or prove future savings; `savingsFraction` is also `null` when baseline tokens are zero.
 
 Intervals assume independent, representative cases. One run per case cannot measure repeated-model variance; related tasks can violate independence. Small samples may show an observed gain while remaining inconclusive. Final test cases stay excluded from selection; subsequent tuning needs a fresh holdout.
 

@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import type { Candidate, CandidateSummary, Evaluation, LedgerEntry, SelectionPolicy, UsageReceipt } from './types.js';
+import type { Candidate, CandidateSummary, Evaluation, LedgerEntry, OptimizationObjective, SelectionPolicy, UsageReceipt } from './types.js';
 
 function require(value: unknown, message: string): asserts value { if (!value) throw new Error(message); }
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -14,19 +14,41 @@ function accuracy(value: unknown, label: string): asserts value is number {
   require(typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1, `${label} must be between zero and one`);
 }
 
-/** Validate and snapshot the policy before paid work. Accuracy is the compatible default. */
+/** New runs minimize tokens by default; objective values are never inferred from a policy. */
+export function normalizeObjective(value?: unknown): OptimizationObjective {
+  if (value === undefined) return 'tokens';
+  require(value === 'tokens' || value === 'accuracy', 'Unsupported objective');
+  return value;
+}
+
+/** Normalize existing policy artifacts. An omitted policy retains the legacy accuracy meaning. */
 export function normalizeSelectionPolicy(value?: unknown): SelectionPolicy {
   if (value === undefined) return Object.freeze({ kind: 'accuracy' });
   require(object(value), 'Invalid selection policy');
   require(Reflect.ownKeys(value).every(key => typeof key === 'string' && Object.getOwnPropertyDescriptor(value, key)?.enumerable
     && Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value')), 'Selection policy must be plain JSON data');
   const fields = value.kind === 'accuracy' ? ['kind'] : ['kind', 'metric', 'minValidationAccuracy', 'maxRegressions'];
-  require(Object.keys(value).length === fields.length && Object.keys(value).every(key => fields.includes(key)), 'Unexpected or missing selection policy fields');
+  const optional = value.kind === 'quality-constrained-resource' ? ['ranking'] : [];
+  require(fields.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => fields.includes(key) || optional.includes(key)), 'Unexpected or missing selection policy fields');
   if (value.kind === 'accuracy') return Object.freeze({ kind: 'accuracy' });
   require(value.kind === 'quality-constrained-resource', 'Unsupported selection policy');
   require(value.metric === 'usd' || value.metric === 'tokens', 'Unsupported selection resource metric');
   accuracy(value.minValidationAccuracy, 'Minimum validation accuracy'); integer(value.maxRegressions, 'Maximum validation regressions');
-  return Object.freeze({ kind: value.kind, metric: value.metric, minValidationAccuracy: value.minValidationAccuracy, maxRegressions: value.maxRegressions });
+  if (Object.hasOwn(value, 'ranking')) require(value.ranking === 'accuracy-first' || value.ranking === 'resource-first', 'Unsupported selection ranking');
+  return Object.freeze({ kind: value.kind, metric: value.metric, minValidationAccuracy: value.minValidationAccuracy, maxRegressions: value.maxRegressions,
+    ...(Object.hasOwn(value, 'ranking') ? { ranking: value.ranking as 'accuracy-first' | 'resource-first' } : {}) });
+}
+
+/** Resolve a new run's declared objective without changing legacy artifact defaults. */
+export function resolveSelectionPolicy(objective: OptimizationObjective, value?: unknown): SelectionPolicy {
+  const normalizedObjective = normalizeObjective(objective);
+  if (normalizedObjective === 'accuracy') return normalizeSelectionPolicy(value);
+  const policy = normalizeSelectionPolicy(value === undefined ? {
+    kind: 'quality-constrained-resource', metric: 'tokens', minValidationAccuracy: 0, maxRegressions: 0, ranking: 'resource-first',
+  } : value);
+  require(policy.kind === 'quality-constrained-resource' && policy.metric === 'tokens' && policy.ranking === 'resource-first',
+    'Tokens objective requires resource-first token selection');
+  return policy;
 }
 
 type SelectionEvaluation = Pick<Evaluation<unknown>, 'id' | 'candidateId' | 'caseId' | 'split' | 'passed' | 'usage'>;
@@ -124,10 +146,14 @@ function eligible(policy: SelectionPolicy, candidate: CandidateSummary, baseline
     && candidate.validationRegressions <= policy.maxRegressions;
 }
 
-/** Shared adoption/promotion rule. Quality is primary; resource use can break accuracy ties. */
+/** Shared adoption/promotion rule, with quality constraints enforced before resource ranking. */
 export function isSelectionImprovement(policy: SelectionPolicy, candidate: CandidateSummary, incumbent: CandidateSummary, baseline: CandidateSummary): boolean {
   const selectedPolicy = normalizeSelectionPolicy(policy); summary(candidate); summary(incumbent); summary(baseline);
-  if (candidate.id === incumbent.id || !eligible(selectedPolicy, candidate, baseline) || candidate.validationAccuracy < incumbent.validationAccuracy) return false;
+  if (candidate.id === incumbent.id || !eligible(selectedPolicy, candidate, baseline)) return false;
+  if (selectedPolicy.kind === 'quality-constrained-resource' && selectedPolicy.ranking === 'resource-first') {
+    return selectedPolicy.metric === 'usd' ? candidate.validationCostMicros < incumbent.validationCostMicros : candidate.validationTokens < incumbent.validationTokens;
+  }
+  if (candidate.validationAccuracy < incumbent.validationAccuracy) return false;
   if (candidate.validationAccuracy > incumbent.validationAccuracy) return true;
   if (selectedPolicy.kind === 'accuracy') return false;
   return selectedPolicy.metric === 'usd' ? candidate.validationCostMicros < incumbent.validationCostMicros : candidate.validationTokens < incumbent.validationTokens;

@@ -11,7 +11,7 @@ experiments/<experiment-id>/
   fixtures/        # optional redistributable inputs and local scoring fixtures
 ```
 
-The experiment module exports `{ id, description, agent, dataset, objective: "accuracy" }`. Build the agent with the package's `defineAgent` API. Imports and initialization must be side-effect-free: paid operations belong only inside metered invocation callbacks. Do not place credentials in a shareable module.
+The experiment module exports `{ id, description, agent, dataset }` with an optional `objective`. Omitted objectives default to `"tokens"`, reducing tokens while preserving baseline quality; explicit `"accuracy"` remains available. Build the agent with the package's `defineAgent` API. Imports and initialization must be side-effect-free: paid operations belong only inside metered invocation callbacks. Do not place credentials in a shareable module.
 
 An experiment README should explain:
 
@@ -27,7 +27,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for the free scaffold, explicit paid-r
 
 ## Benchmark experiments
 
-[SWE-bench](swe-bench/README.md) imports pinned instances, runs your existing coding agent in a fresh repository checkout, and grades its patch with the official Docker harness. It supports the SWE-bench, Lite, and Verified dataset families through a compatible pinned evaluator. The optimizer changes only declared prompts and tool descriptions.
+[SWE-bench](swe-bench/README.md) imports pinned instances, runs your existing coding agent in a fresh repository checkout, and grades its patch with the official Docker harness. Use `npm run swe -- init --out .evopt/swe-config.json --agent ./my-agent.mjs` to start its configuration workflow. It supports the SWE-bench, Lite, and Verified dataset families through a compatible pinned evaluator. The optimizer changes only declared prompts and tool descriptions, using the tokens objective.
 
 SWE experiments use explicitly selected disjoint train/validation/test groups and carry benchmark provenance into contribution evidence. See [benchmark preparation](../benchmarks/README.md) before choosing a paid run budget and [the benchmark catalog research](../benchmarks/RESEARCH.md) for other software-engineering suites.
 

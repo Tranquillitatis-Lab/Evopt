@@ -5,8 +5,9 @@ import type { Accounting, Agent, Candidate, Components, Evaluation, InvocationRe
 import { applyPatch, assert, canonical, clone, freeze, hash, integer, micros, price, record, text, validateAccounting, validateAgent, validateOptions } from './validation.js';
 import { defaultRunDirectory, openStore } from './storage.js';
 import { proposalContext } from './structure.js';
-import { chooseCandidate, isSelectionImprovement, normalizeSelectionPolicy, summarizeCandidates } from './selection.js';
+import { chooseCandidate, isSelectionImprovement, normalizeObjective, resolveSelectionPolicy, summarizeCandidates } from './selection.js';
 import { buildTrainingExperience, normalizeExperienceSettings } from './experience.js';
+import { tokenEnvelope, usageTokens } from './tokens.js';
 
 export function defineAgent<I, O>(agent: Agent<I, O>): Agent<I, O> { validateAgent(agent); return agent; }
 export function exactMatch<O>({ output, expected }: { output: O; expected: O }): boolean { return isDeepStrictEqual(output, expected); }
@@ -41,7 +42,8 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
   // Snapshot data/settings while retaining only explicitly supplied callbacks.
   const source = options.agent, d = options.dataset;
   const structure = proposalContext(source);
-  const selection = freeze(normalizeSelectionPolicy(source.optimization.selection));
+  const objective = normalizeObjective(options.objective);
+  const selection = freeze(resolveSelectionPolicy(objective, source.optimization.selection));
   const experience = freeze(normalizeExperienceSettings(source.optimization.experience));
   const agent: Agent<I, O> = { ...source, components: freeze(clone(source.components)), mutable: freeze(clone(source.mutable)), ...(structure ? { structure } : {}), accounting: freeze(clone(source.accounting)),
     optimization: { ...source.optimization, selection, experience, ...(source.optimization.strategy ? { strategy: { ...source.optimization.strategy } } : {}), proposer: { ...source.optimization.proposer, accounting: freeze(clone(source.optimization.proposer.accounting)) } } };
@@ -51,13 +53,16 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
   const holdout = bound * dataset.test.length * 2;
   assert(Number.isSafeInteger(holdout), 'Unsafe holdout reservation');
   assert((dataset.train.length + dataset.validation.length) * bound + holdout <= cap, 'Budget cannot cover baseline and final test envelope');
+  const maxTokens = options.run?.maxTokens, targetTokens = tokenEnvelope(agent.accounting), holdoutTokens = targetTokens * dataset.test.length * 2;
+  integer(holdoutTokens);
+  if (maxTokens !== undefined) assert((dataset.train.length + dataset.validation.length) * targetTokens + holdoutTokens <= maxTokens, 'Token ceiling cannot cover baseline and final test envelope');
   assert(!options.run?.resume || options.run.directory, 'Resume requires an explicit directory');
   const config = {
-    format: 1, engine: 'evopt-0.1.0', exportContract: 2, agent: { id: agent.id, version: agent.version, components: agent.components, mutable: agent.mutable, accounting: agent.accounting, ...(structure ? { structure } : {}) },
+    format: 1, engine: 'evopt-0.1.0', exportContract: 3, agent: { id: agent.id, version: agent.version, components: agent.components, mutable: agent.mutable, accounting: agent.accounting, ...(structure ? { structure } : {}) },
     dataset: { id: dataset.id, version: dataset.version, train: dataset.train, validation: dataset.validation, test: dataset.test, ...(dataset.benchmark ? { benchmark: clone(dataset.benchmark) } : {}) },
     proposer: { id: agent.optimization.proposer.id, version: agent.optimization.proposer.version, accounting: agent.optimization.proposer.accounting },
-    strategy: { id: agent.optimization.strategy?.id ?? (selection.kind === 'accuracy' ? strategy.id : `validation-accuracy-${selection.metric}`), version: agent.optimization.strategy?.version ?? '1' }, selection, experience, attempts: agent.optimization.maxAttempts ?? 10,
-    objective: options.objective, cap, includeTraces: options.run?.includeTraces ?? false,
+    strategy: { id: agent.optimization.strategy?.id ?? (selection.kind === 'accuracy' ? strategy.id : `validation-${selection.ranking ?? 'accuracy-first'}-${selection.metric}`), version: agent.optimization.strategy?.version ?? '1' }, selection, experience, attempts: agent.optimization.maxAttempts ?? 10,
+    objective, cap, ...(maxTokens === undefined ? {} : { maxTokens }), includeTraces: options.run?.includeTraces ?? false,
   };
   const fingerprint = hash(config), baseId = hash(agent.components);
   const directory = resolve(options.run?.directory ?? defaultRunDirectory());
@@ -86,16 +91,24 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
         && receipts.filter(r => r.inputTokens + r.outputTokens > 0).length <= accounting.limits.maxModelCalls, 'Recorded usage exceeds invocation limits');
     }
     integer(occupied(s.entries)); assert(occupied(s.entries) <= cap, 'Recorded charges exceed the run ceiling');
+    const occupiedTokens = (): number => s.entries.reduce((sum, entry) => sum + (entry.status === 'pending'
+      ? tokenEnvelope(entry.purpose === 'proposal' ? agent.optimization.proposer.accounting : agent.accounting) : usageTokens(entry.receipts ?? [])), 0);
+    integer(occupiedTokens()); if (maxTokens !== undefined) assert(occupiedTokens() <= maxTokens, 'Recorded tokens exceed the run ceiling');
     assert(!Object.keys(s.unrecoverableCalls ?? {}).length, 'Invocation output could not be saved; automatic resume refused to avoid repeating completed work');
     const find = (id: string): Candidate => s.candidates.find(c => c.id === id)!;
     const remainingHoldout = (): number => s.phase === 'test'
       ? (s.schedule ?? []).filter(x => !s.calls[`eval:${x.candidateId}:test:${x.caseId}`]).length * bound : holdout;
+    const remainingHoldoutTokens = (): number => s.phase === 'test'
+      ? (s.schedule ?? []).filter(x => !s.calls[`eval:${x.candidateId}:test:${x.caseId}`]).length * targetTokens : holdoutTokens;
     async function invoke<T>(key: string, purpose: string, accounting: Accounting, fn: (context: RunContext) => Promise<InvocationResult<T>>): Promise<InvocationResult<T>> {
       if (options.run?.signal?.aborted) throw new Stop('Cancelled');
       if (Object.hasOwn(s.calls, key)) return clone(s.calls[key]) as InvocationResult<T>;
       const reserved = validateAccounting(accounting);
       const protection = s.phase === 'test' ? Math.max(0, remainingHoldout() - reserved) : holdout;
       if (occupied(s.entries) + reserved + protection > cap) throw new Stop('Budget exhausted');
+      const reservedTokens = tokenEnvelope(accounting);
+      const protectedTokens = s.phase === 'test' ? Math.max(0, remainingHoldoutTokens() - reservedTokens) : holdoutTokens;
+      if (maxTokens !== undefined && occupiedTokens() + reservedTokens + protectedTokens > maxTokens) throw new Stop('Token budget exhausted');
       const id = randomUUID(), entry: LedgerEntry = { id, purpose, reservedMicros: reserved, status: 'pending' };
       s.entries.push(entry); await store.save();
       const controller = new AbortController();
@@ -199,6 +212,8 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
             // Do not pay for a proposal unless its full candidate evaluation can also fit.
             const need = validateAccounting(agent.optimization.proposer.accounting) + bound * (dataset.train.length + dataset.validation.length);
             if (occupied(s.entries) + holdout + need > cap) break;
+            const neededTokens = tokenEnvelope(agent.optimization.proposer.accounting) + targetTokens * (dataset.train.length + dataset.validation.length);
+            if (maxTokens !== undefined && occupiedTokens() + holdoutTokens + neededTokens > maxTokens) break;
             const attempt = s.nextAttempt, incumbent = find(s.selectedId);
             const feedback = s.evaluations.filter(e => e.candidateId === incumbent.id && e.split === 'train').map(e => {
               const c = dataset.train.find(c => c.id === e.caseId)!;
@@ -227,7 +242,7 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
             ? strategy.select(freeze(clone(eligible)), s.selectedId)
             : chooseCandidate(selection, eligible, s.selectedId, baseId);
           assert(eligible.some(c => c.id === selected), 'Strategy selected an unevaluated candidate');
-          assert(find(selected).validationAccuracy! >= find(s.selectedId).validationAccuracy!, 'Strategy degraded validation accuracy');
+          if (agent.optimization.strategy) assert(find(selected).validationAccuracy! >= find(s.selectedId).validationAccuracy!, 'Strategy degraded validation accuracy');
           if (isSelectionImprovement(selection, eligible.find(c => c.id === selected)!, eligible.find(c => c.id === s.selectedId)!, eligible.find(c => c.id === baseId)!)) s.selectedId = selected;
           s.history.push({ ...find(active.candidateId).lineage!, attempt: active.attempt, status: 'evaluated', candidateId: active.candidateId });
           s.nextAttempt++; delete s.active; await store.save();
@@ -243,13 +258,24 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
     } catch (e) { reason = message(e); }
     const selected = find(s.selectedId);
     const testAccuracy = (id: string): number => { const rows = s.evaluations.filter(e => e.split === 'test' && e.candidateId === id); return rows.filter(e => e.passed).length / rows.length; };
+    let reportedTokens: number | undefined;
+    if (maxTokens !== undefined) {
+      try { reportedTokens = occupiedTokens(); }
+      catch (error) {
+        // Preserve the interruption and original invalid receipts for review rather
+        // than inventing a valid token total for a broken integration contract.
+        if (s.phase === 'completed' || !s.entries.some(entry => entry.status === 'envelope_violation')) throw error;
+        reason = `${reason ?? 'Adapter exceeded its declared envelope'}; token usage unavailable: ${message(error)}`;
+      }
+    }
     return clone({ status: s.phase === 'completed' ? 'completed' : 'interrupted', ...(reason ? { reason } : {}), directory,
       components: selected.components, selectedId: selected.id,
       changes: Object.fromEntries(Object.keys(agent.mutable).filter(k => selected.components[k] !== agent.components[k]).map(k => [k, { before: agent.components[k]!, after: selected.components[k]! }])),
       candidates: s.candidates, history: s.history, evaluations: s.evaluations,
-      configuration: { mutable: agent.mutable, ...(structure ? { structure } : {}), selection, experience },
+      configuration: { mutable: agent.mutable, ...(structure ? { structure } : {}), objective, selection, experience },
       ...(s.phase === 'completed' ? { test: { kind: s.selectedId === baseId ? 'identity-control' : 'paired', baselineAccuracy: testAccuracy(baseId), candidateAccuracy: testAccuracy(s.selectedId) } } : {}),
-      accounting: { currency: 'USD', limitMicros: cap, occupiedMicros: occupied(s.entries), entries: s.entries },
+      accounting: { currency: 'USD', limitMicros: cap, occupiedMicros: occupied(s.entries), entries: s.entries,
+        ...(maxTokens === undefined ? {} : { maxTokens, ...(reportedTokens === undefined ? {} : { occupiedTokens: reportedTokens }) }) },
       provenance: { agentId: agent.id, agentVersion: agent.version, datasetId: dataset.id, datasetVersion: dataset.version, fingerprint, synthetic: agent.accounting.kind === 'free' && agent.optimization.proposer.accounting.kind === 'free', ...(config.dataset.benchmark ? { benchmark: config.dataset.benchmark } : {}) },
     } as OptimizationResult<O>);
   } finally { await store.close(); }

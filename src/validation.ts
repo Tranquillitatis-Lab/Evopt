@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Accounting, Agent, BenchmarkProvenance, Components, OptimizeOptions, UsageReceipt } from './types.js';
 import { validateStructure } from './structure.js';
-import { normalizeSelectionPolicy } from './selection.js';
+import { normalizeObjective, normalizeSelectionPolicy, resolveSelectionPolicy } from './selection.js';
 import { normalizeExperienceSettings } from './experience.js';
 
 export function assert(value: unknown, message: string): asserts value { if (!value) throw new Error(message); }
@@ -86,7 +86,10 @@ export function validateAgent<I, O>(a: Agent<I, O>): void {
 }
 export function validateOptions<I, O>(o: OptimizeOptions<I, O>): void {
   assert(record(o), 'Missing options'); validateAgent(o.agent);
-  assert(o.objective === 'accuracy', 'Unsupported objective'); assert(micros(o.budget, false) > 0, 'Budget must be at least one USD micro-unit');
+  const selection = resolveSelectionPolicy(normalizeObjective(o.objective), o.agent.optimization.selection);
+  assert(selection.kind === 'accuracy' || o.agent.optimization.strategy === undefined, 'Custom strategy cannot be combined with resource selection');
+  assert(micros(o.budget, false) > 0, 'Budget must be at least one USD micro-unit');
+  if (o.run?.maxTokens !== undefined) integer(o.run.maxTokens, 1);
   const d = o.dataset; assert(record(d), 'Missing dataset'); text(d.id); text(d.version); assert(typeof d.score === 'function', 'Missing local scorer');
   if (d.benchmark !== undefined) validateBenchmarkProvenance(d.benchmark);
   const ids = new Set<string>(); const inputs = new Map<string,string>();

@@ -91,9 +91,12 @@ export interface Proposer<I = unknown, O = unknown> {
   id: string; version: string; accounting: Accounting;
   propose(request: ProposalRequest<I, O>, context: RunContext): Promise<InvocationResult<Record<string, string>>>;
 }
+export type OptimizationObjective = 'tokens' | 'accuracy';
 export type SelectionPolicy =
   | { readonly kind: 'accuracy' }
-  | { readonly kind: 'quality-constrained-resource'; readonly metric: 'usd' | 'tokens'; readonly minValidationAccuracy: number; readonly maxRegressions: number };
+  | { readonly kind: 'quality-constrained-resource'; readonly metric: 'usd' | 'tokens'; readonly minValidationAccuracy: number; readonly maxRegressions: number;
+      /** Omitted preserves accuracy-first behavior in existing policies and artifacts. */
+      readonly ranking?: 'accuracy-first' | 'resource-first' };
 export interface CandidateSummary {
   id: string; trainAccuracy: number; validationAccuracy: number;
   /** Observed settled validation charges, including any paid tools. */
@@ -117,8 +120,10 @@ export interface Agent<I, O> {
   optimization: { proposer: Proposer<I, O>; maxAttempts?: number; strategy?: SearchStrategy; selection?: SelectionPolicy; experience?: ExperienceSettings };
 }
 export interface OptimizeOptions<I, O> {
-  agent: Agent<I, O>; dataset: Dataset<I, O>; objective: 'accuracy'; budget: number;
-  run?: { directory?: string; resume?: boolean; signal?: AbortSignal; includeTraces?: boolean };
+  agent: Agent<I, O>; dataset: Dataset<I, O>;
+  /** Defaults to reducing tokens while preserving baseline validation quality. */
+  objective?: OptimizationObjective; budget: number;
+  run?: { directory?: string; resume?: boolean; signal?: AbortSignal; includeTraces?: boolean; maxTokens?: number };
 }
 export interface Evaluation<O> {
   id: string; candidateId: string; caseId: string; split: 'train' | 'validation' | 'test';
@@ -136,8 +141,8 @@ export interface OptimizationResult<O> {
   history: { attempt: number; status: string; candidateId?: string; reason?: string; parentId?: string; proposalId?: string; changedKeys?: string[]; operator?: 'proposer-text-patch' }[];
   evaluations: Evaluation<O>[];
   test?: { kind: 'paired' | 'identity-control'; baselineAccuracy: number; candidateAccuracy: number };
-  accounting: { currency: 'USD'; limitMicros: number; occupiedMicros: number; entries: LedgerEntry[] };
+  accounting: { currency: 'USD'; limitMicros: number; occupiedMicros: number; entries: LedgerEntry[]; maxTokens?: number; occupiedTokens?: number };
   /** Text permissions and immutable agent metadata, retained for reviewable patch export. */
-  configuration?: { mutable: Readonly<Record<string, MutableComponent>>; structure?: AgentStructure; selection?: SelectionPolicy; experience?: NormalizedExperienceSettings };
+  configuration?: { mutable: Readonly<Record<string, MutableComponent>>; structure?: AgentStructure; objective?: OptimizationObjective; selection?: SelectionPolicy; experience?: NormalizedExperienceSettings };
   provenance: { agentId: string; agentVersion: string; datasetId: string; datasetVersion: string; fingerprint: string; synthetic: boolean; benchmark?: BenchmarkProvenance };
 }

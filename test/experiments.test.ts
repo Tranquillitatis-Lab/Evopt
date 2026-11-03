@@ -69,11 +69,13 @@ test('contributor scaffold runs offline outside the repository and exports revie
   await command('init', '--out', config);
   const source = await readFile(config, 'utf8');
   assert.doesNotMatch(source, /dsh|apiKey\s*:\s*['"][^'"]+['"]/i);
-  const checked = JSON.parse((await command('check', '--config', config, '--budget', '10')).stdout);
+  const checked = JSON.parse((await command('check', '--config', config, '--budget', '10', '--max-tokens', '1000')).stdout);
   assert.equal(checked.inferenceRun, false); assert.equal(checked.paid, false);
-  await command('run', '--config', config, '--budget', '10', '--out', run);
+  assert.equal(checked.maxTokens, 1000); assert.equal(checked.tokenMinimumFits, true);
+  await command('run', '--config', config, '--budget', '10', '--max-tokens', '1000', '--out', run);
   const result = JSON.parse(await readFile(join(run, 'result.json'), 'utf8'));
   assert.equal(result.status, 'completed'); assert.equal(result.accounting.occupiedMicros, 0);
+  assert.equal(result.accounting.maxTokens, 1000); assert.equal(result.accounting.occupiedTokens, 0);
   assert.equal(result.test.kind, 'paired'); assert.equal(result.test.candidateAccuracy, 1);
   const status = JSON.parse((await command('status', '--run', run)).stdout);
   assert.equal(status.phase, 'completed'); assert.equal(status.pending, false);
@@ -97,6 +99,10 @@ test('CLI requires an explicit budget, rejects unknown flags, and refuses scaffo
   assert.equal(await readFile(config, 'utf8'), before);
   await rejection(['run', '--config', config, '--out', join(root, 'run')], /budget/i);
   await rejection(['run', '--config', config, '--out', join(root, 'run'), '--budget', '10', '--unknown'], /unknown/i);
+  await writeFile(config, 'throw new Error("Invalid token ceilings must fail before import");\n');
+  for (const count of ['0', '-1', '1.5', 'NaN', '9007199254740992']) {
+    await rejection(['run', '--config', config, '--out', join(root, 'run'), '--budget', '10', '--max-tokens', count], /max-tokens must be a positive safe integer/);
+  }
 });
 
 test('CLI paid opt-in is checked before invoking the application runner', async t => {

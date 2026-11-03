@@ -1,5 +1,6 @@
 import type { LedgerEntry, UsageReceipt } from './types.js';
 import { assert, canonical, integer, micros, record, text } from './validation.js';
+import { usageTokens } from './tokens.js';
 
 export interface EvidenceEvaluation {
   id: string; candidateId: string; caseId: string; split: 'train' | 'validation' | 'test';
@@ -11,7 +12,7 @@ export interface EvidenceInput {
   candidates: readonly { id: string }[]; selectedId: string;
   evaluations: readonly EvidenceEvaluation[];
   test?: { kind: 'paired' | 'identity-control'; baselineAccuracy: number; candidateAccuracy: number };
-  accounting: { currency: 'USD'; limitMicros: number; occupiedMicros: number; entries: readonly LedgerEntry[] };
+  accounting: { currency: 'USD'; limitMicros: number; occupiedMicros: number; entries: readonly LedgerEntry[]; maxTokens?: number; occupiedTokens?: number };
 }
 export interface EvidenceInterval { lower: number; upper: number; confidence: 0.95 }
 export interface AccuracyEvidence { successes: number; n: number; estimate: number; interval95: EvidenceInterval }
@@ -32,6 +33,13 @@ export interface ReviewEvidence {
     testTotalMicros: number; proposalMicros: number; otherEvaluationMicros: number; totalRunMicros: number;
     deltaMeanMicros: number; sharedTestInvocations: boolean;
   };
+  tokens: {
+    baselineTest: number; candidateTest: number; saved: number; savingsFraction: number | null;
+    proposal: number; otherEvaluations: number; totalRun: number; sharedTestInvocations: boolean;
+    perCase: { caseId: string; baseline: number; candidate: number; delta: number }[];
+    /** Descriptive resampling of task pairs, not a non-inferiority guarantee. */
+    deltaInterval95: { lower: number; upper: number; method: 'descriptive-task-bootstrap-95' } | null;
+  };
   methods: { accuracy: 'wilson-score-95'; delta: 'paired-hoeffding-95' | 'not-applicable-identity-control'; mcnemar: 'exact-two-sided-binomial' | 'not-applicable-identity-control' };
   assumptions: string[]; limitations: string[];
 }
@@ -42,6 +50,14 @@ function accuracy(successes: number, n: number): AccuracyEvidence {
   const denominator = 1 + z2 / n, center = (estimate + z2 / (2 * n)) / denominator;
   const margin = z * Math.sqrt(estimate * (1 - estimate) / n + z2 / (4 * n * n)) / denominator;
   return { successes, n, estimate, interval95: { lower: Math.max(0, center - margin), upper: Math.min(1, center + margin), confidence: 0.95 } };
+}
+
+function tokenInterval(deltas: number[]): ReviewEvidence['tokens']['deltaInterval95'] {
+  if (deltas.length < 2) return null;
+  let seed = 0x65766f70;
+  const random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 0x1_0000_0000; };
+  const draws = Array.from({ length: 1000 }, () => deltas.reduce(sum => sum + deltas[Math.floor(random() * deltas.length)]!, 0) / deltas.length).sort((a, b) => a - b);
+  return { lower: draws[25]!, upper: draws[974]!, method: 'descriptive-task-bootstrap-95' };
 }
 
 // Conditional exact McNemar: min(1, 2 * P[Binomial(b+c, 1/2) <= min(b,c)]).
@@ -90,7 +106,7 @@ export function analyzeEvidence(input: EvidenceInput): ReviewEvidence {
   integer(accounting.limitMicros, 1); integer(accounting.occupiedMicros);
   const entries: readonly LedgerEntry[] = accounting.entries;
   const ledger = new Map<string, LedgerEntry>(), receiptIds = new Set<string>();
-  let totalRunMicros = 0, proposalMicros = 0;
+  let totalRunMicros = 0, proposalMicros = 0, totalRunTokens = 0, proposalTokens = 0;
   for (const entry of entries) {
     assert(record(entry), 'Malformed evidence ledger entry'); text(entry.id); text(entry.purpose);
     assert(!ledger.has(entry.id), 'Duplicate evidence ledger identity');
@@ -109,11 +125,17 @@ export function analyzeEvidence(input: EvidenceInput): ReviewEvidence {
       if (entry.reservedMicros === 0) assert(receipt.inputTokens === 0 && receipt.outputTokens === 0 && (receipt.extraCostUSD ?? 0) === 0, 'Free ledger entry contains paid usage');
     }
     assert(entry.chargedMicros >= extras, 'Settled charge omits known non-token charges');
+    const tokens = usageTokens(receipts); totalRunTokens += tokens; integer(totalRunTokens);
+    if (entry.purpose === 'proposal') { proposalTokens += tokens; integer(proposalTokens); }
     totalRunMicros += entry.chargedMicros; integer(totalRunMicros);
     if (entry.purpose === 'proposal') { proposalMicros += entry.chargedMicros; integer(proposalMicros); }
     ledger.set(entry.id, entry);
   }
   assert(totalRunMicros === accounting.occupiedMicros && totalRunMicros <= accounting.limitMicros, 'Evidence ledger total does not reconcile');
+  if (accounting.maxTokens !== undefined) {
+    integer(accounting.maxTokens, 1); integer(accounting.occupiedTokens);
+    assert(accounting.occupiedTokens === totalRunTokens && totalRunTokens <= accounting.maxTokens, 'Evidence token ceiling does not reconcile');
+  } else assert(accounting.occupiedTokens === undefined, 'Token accounting requires its ceiling');
   assert(Array.isArray(input.evaluations), 'Missing evaluation evidence');
   const evaluations: readonly EvidenceEvaluation[] = input.evaluations;
   const evaluationIds = new Set<string>(), pairIds = new Set<string>(), caseSplits = new Map<string, string>();
@@ -158,6 +180,11 @@ export function analyzeEvidence(input: EvidenceInput): ReviewEvidence {
   };
   const baselineTest = armCost(baseline, baselineAccuracy.successes), candidateTest = armCost(candidate, candidateAccuracy.successes);
   const testTotalMicros = baselineTest.totalMicros + (identity ? 0 : candidateTest.totalMicros);
+  const perCase = cases.map(caseId => {
+    const before = usageTokens(baseline.get(caseId)!.usage), after = usageTokens(candidate.get(caseId)!.usage);
+    return { caseId, baseline: before, candidate: after, delta: after - before };
+  });
+  const baselineTestTokens = perCase.reduce((sum, row) => sum + row.baseline, 0), candidateTestTokens = perCase.reduce((sum, row) => sum + row.candidate, 0);
   const estimate = (paired.improved - paired.regressed) / n;
   // Hoeffding (1963), Theorem 2, applied to independent D_i in [-1,1]:
   // P(|mean(D)-E mean(D)| >= epsilon) <= 2 exp(-n epsilon^2 / 2).
@@ -171,6 +198,10 @@ export function analyzeEvidence(input: EvidenceInput): ReviewEvidence {
     costs: { currency: 'USD', baselineTest, candidateTest, testTotalMicros, proposalMicros,
       otherEvaluationMicros: totalRunMicros - proposalMicros - testTotalMicros, totalRunMicros,
       deltaMeanMicros: candidateTest.meanMicros - baselineTest.meanMicros, sharedTestInvocations: identity },
+    tokens: { baselineTest: baselineTestTokens, candidateTest: candidateTestTokens, saved: baselineTestTokens - candidateTestTokens,
+      savingsFraction: baselineTestTokens === 0 ? null : 1 - candidateTestTokens / baselineTestTokens,
+      proposal: proposalTokens, otherEvaluations: totalRunTokens - proposalTokens - baselineTestTokens - (identity ? 0 : candidateTestTokens),
+      totalRun: totalRunTokens, sharedTestInvocations: identity, perCase, deltaInterval95: identity ? null : tokenInterval(perCase.map(row => row.delta)) },
     methods: { accuracy: 'wilson-score-95', delta: identity ? 'not-applicable-identity-control' : 'paired-hoeffding-95', mcnemar: identity ? 'not-applicable-identity-control' : 'exact-two-sided-binomial' },
     assumptions: [
       'Held-out cases are independent and representative of the intended task population; outcomes within each baseline/candidate pair may be dependent.',
@@ -179,6 +210,7 @@ export function analyzeEvidence(input: EvidenceInput): ReviewEvidence {
     ],
     limitations: [
       'One draw per task and configuration cannot quantify model rerun variance.',
+      'The token interval descriptively resamples task-pair mean deltas using 1,000 fixed-seed draws; it does not bound rerun variance, establish quality non-inferiority, or predict future savings.',
       'Wilson intervals are approximate score intervals; the paired Hoeffding interval is distribution-free and conservative only under the stated independence assumptions.',
       'Intervals and p-values are conditional summaries, not statistical proof or a guarantee of production improvement; no significance or promotion decision is made.',
       'Repeated searches, multiple comparisons, and reuse of held-out cases are not corrected for.',

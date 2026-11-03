@@ -30,9 +30,14 @@ test('briefs give the full local workflow with explicit boundaries and no spendi
   for (const preset of listAssistants()) {
     const brief = renderAssistantBrief(preset.id);
     assert.ok(brief.includes(preset.name));
-    for (const command of ['init', 'check', 'run', 'status', 'export', 'validate']) {
-      assert.ok(brief.includes(`npm run experiment -- ${command}`));
+    for (const command of ['init', 'check', 'run', 'status', 'review', 'submit']) {
+      assert.ok(brief.includes(`npm run swe -- ${command}`));
     }
+    assert.ok(brief.includes('npm run experiment -- validate'));
+    assert.match(brief, /--agent \.\/my-agent\.mjs/);
+    assert.match(brief, /--max-tokens <TOKEN_COUNT>/);
+    assert.match(brief, /strictly fewer validation tokens/);
+    assert.match(brief, /zero regressions on baseline-passing cases/);
     assert.match(brief, /Read README\.md and CONTRIBUTING\.md first/);
     assert.match(brief, /not an automatic optimization-target adapter/);
     assert.match(brief, /--budget <USD_AMOUNT>/);

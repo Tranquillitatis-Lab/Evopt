@@ -1,91 +1,85 @@
-# Contributing optimization experiments
+# Contribute an optimization result
 
-Contributors can spend their own explicitly approved token budget to propose better prompts and tool descriptions, then submit the resulting configuration and evidence for review. An accepted improvement becomes a versioned starting point for a later experiment. Evopt never installs a candidate or changes production agents automatically.
+Connect your existing coding agent, choose a USD ceiling, run a pinned SWE-bench experiment, and share the resulting configuration and evidence. Evopt's default objective is fewer tokens while preserving baseline task quality.
 
-Keep experiment definitions, private run evidence, and reviewed contributions separate. The workflow uses Evopt's general-agent adapter and USD accounting contract; no particular agent framework is required.
+## Connect and prepare
 
-Choose your contributor assistant and target provider using [INTEGRATIONS.md](INTEGRATIONS.md). These are separate choices: a Cursor or Claude Code brief guides the contributor workflow; a metered model API adapter runs inside the optimization budget. The integration listing distinguishes built-ins from SDKs that still need custom adapters.
-
-## Start with a free run
-
-Use Node.js 22 or newer. From the repository root:
+Use Node.js 22 or newer from this checkout:
 
 ```sh
 npm install
-npm test
-npm run experiment -- init --out .evopt/experiment.mjs
-npm run experiment -- check --config .evopt/experiment.mjs
-npm run experiment -- run --config .evopt/experiment.mjs --budget 1 --out .evopt/runs/first-run
-npm run experiment -- status --run .evopt/runs/first-run
+npm run swe -- init --out .evopt/swe-config.json --agent ./my-agent.mjs
 ```
 
-The generated experiment uses a deterministic local agent and proposer. It spends zero and demonstrates the complete workflow. Its scores are synthetic evidence, not a benchmark result or a reason to change a shared default. `--budget 1` is a USD ceiling, not a number of iterations.
+`init` creates a draft configuration; it does not create a working coding agent or download benchmark assets. Your module exports a configured named `agent`. Follow [the connection example](experiments/swe-bench/README.md#connect-your-agent), then [prepare the benchmark](benchmarks/README.md#prepare-swe-bench).
 
-`run` includes train/validation search and final held-out evaluation. `validate` below checks a submission file; it does not open a test partition or make provider calls. Use a fresh output directory for a new experiment. To resume, repeat the same `run` command, directory, budget, and paid authorization with `--resume`. Unknown billing blocks resume. After a process crash, both `experiment.lock` and `run.lock` may remain; verify their owners have stopped before removing stale locks, and never delete the ledger or journal. See the [API reference](API.md#durable-runs-and-recovery) for the library's explicit resume API.
+Fill the draft with your manifest, private source export, agent module, Python executable, pinned official harness, and private evidence directory. Provision repository snapshots, Docker, dependencies, and required images separately. SWE-bench, Lite, and Verified use the same integration.
 
-## Bring an existing agent
+Before running:
 
-Use [benchmarks/](benchmarks/README.md) for the SWE-bench importer, fresh repository workspaces, and pinned official evaluator. The [SWE-bench experiment](experiments/swe-bench/README.md) connects SWE-bench, Lite, or Verified tasks to your existing coding agent. Evopt changes its declared prompts and tool descriptions; that agent produces repository patches under its own enforced tool/runtime limits. Gold patches and hidden tests remain in private evaluator data.
+- Pin agent/proposer/model versions, initial text, the mutable allowlist, dataset partitions, scorer/harness, and prices.
+- Make every evaluation a fresh session and tool environment. Apply the supplied text to the actual prompts and tool descriptions.
+- Account for every paid model call, retry, and paid tool operation inside an enforced invocation envelope.
+- Keep gold patches, hidden tests, and grader reports outside the agent's accessible environment.
 
-Prepare local source exports and repository snapshots, provision the official harness and Docker, then run benchmark preparation and evaluator checks before authorizing paid optimization. Preserve the source revision, file hash, split manifest, evaluator revision, container/dependency details, and official reports with the experiment evidence. Local harness compute and storage are outside the inference USD ceiling. A successful configuration check does not prove that a Docker test run will succeed.
+Agent modules are trusted code. Imports must not make provider calls or install software; paid work belongs inside the metered callbacks. See [the adapter and accounting contracts](API.md#adapt-an-existing-agent).
 
-An experiment module exports an object containing `id`, `description`, `agent`, `dataset`, and `objective: "accuracy"`. Configure `agent` with `defineAgent` as shown in the [adapter guide](API.md#adapt-an-existing-agent). Its mutable allowlist should contain only the specific prompt or tool-description fields being investigated.
-
-For a reproducible experiment:
-
-- Pin the agent implementation, starting components, proposer, model settings, dataset revision, and scorer version. Explain the intended improvement before examining test results.
-- Declare disjoint train, validation, and test cases. Keep the scorer local and deterministic, and never pass labels to the target agent.
-- Create fresh agent state and isolated tool fixtures inside every invocation. Wire the supplied components into the agent's actual prompts and tool descriptions.
-- Account for every paid model call, retry, and paid tool operation. Review the constant invocation envelope, enforced limits, and pricing provenance against the [accounting contract](API.md#usd-accounting-contract).
-
-Experiment modules and adapter callbacks are trusted application code. Loading a module executes its top-level code. Keep imports and module initialization free of provider calls, installations, and other side effects; put paid operations inside the metered runner or proposer callbacks. Read an unfamiliar experiment before running `check` or `run`.
-
-The existing OpenAI proposer is optional. Provide its credentials and reviewed model/pricing configuration explicitly in your private module. Do not put keys in an experiment committed to this repository. There is no implicit provider configuration or free subscription balance.
-
-## Spend an explicit budget
-
-First run the configuration check and review its output. A paid experiment requires both a numeric USD ceiling and `--allow-paid`:
+## Check and run
 
 ```sh
-npm run experiment -- check --config .evopt/experiment.mjs
-npm run experiment -- run --config .evopt/experiment.mjs --budget 10 --out .evopt/runs/reviewed-run --allow-paid
-npm run experiment -- status --run .evopt/runs/reviewed-run
+npm run swe -- check --config .evopt/swe-config.json --budget 10
+npm run swe -- run --config .evopt/swe-config.json --budget 10 --out .evopt/runs/swe-1 --allow-paid
+npm run swe -- review --run .evopt/runs/swe-1
 ```
 
-The amount `10` is an example, not spending authorization. The person paying must choose the amount and authorize paid execution. If directing a coding assistant, a useful request is: “Read CONTRIBUTING.md, inspect my experiment, and run it with a total ceiling of USD X. Stop at the ceiling and keep the evidence private for my review.” Supply the actual amount; never infer it from this guide.
+The person paying chooses and authorizes the amount; `10` is only an example. The USD ceiling includes target evaluations, proposals, rejected proposals, and final held-out evaluation. Local harness compute and storage are excluded. Each new run directory has its own ceiling.
 
-The ceiling covers target-agent evaluations and candidate proposals, including rejected proposals. Final-test funds are protected before search. A separate invocation with a new run directory has a separate ceiling; do not treat several runs as one shared budget. Unknown billing stops execution and blocks automatic retry. Do not remove reservations or increase a recorded ceiling to make evidence appear compliant.
+To also cap total tokens, add `--max-tokens 200000` to `check` and `run`, replacing the example count with your chosen limit. This includes both target and proposer input/output usage; cached input and reasoning are counted once as subsets. Inspect `minimumFits` and, when capped, `tokenMinimumFits` in the check output. `run` refuses insufficient baseline/holdout bounds before inference and protects the final comparison allowance.
+
+Checks verify local setup and planned bounds without model inference. They do not prove a later Docker evaluation will succeed. Default selection requires strictly fewer validation tokens with at least baseline accuracy and zero observed baseline-case regressions; test results never select candidates.
+
+For recovery, repeat the exact `run` command and directory with `--resume`. Unknown billing blocks resume. Keep the ledger and journal intact; inspect process ownership before removing stale `experiment.lock` or `run.lock` files. A different configuration or ceiling requires a new run. See [recovery details](API.md#durable-runs-and-recovery).
 
 ## Review and export
 
-Run `npm run experiment -- review --run <run-dir>` to inspect paired accuracy intervals, regression case IDs, and settled cost trade-offs. The [configuration guide](CONFIGURATION.md) describes structured roles/contracts, framework maps, statistical assumptions, and guarded patch application. After reviewing the text, `npm run experiment -- patch --run <run-dir> --out <patch.json> --reviewed` writes a standalone configuration patch.
+Review baseline/candidate token use, resolved tasks, individual regressions, uncertainty, accounted USD, and rejected proposals. A cheaper bill due to caching is not the same as fewer tokens. The token interval describes this task sample, not model rerun variance or guaranteed savings; see [evidence assumptions](CONFIGURATION.md#inspect-evidence-and-export-a-patch). Preserve null and inconclusive outcomes.
 
-Keep private modules and full runs under `.evopt/`, which is ignored by Git. Before exporting, inspect the candidate text, identifiers, summaries, receipt metadata, and evidence you intend to share. Confirm that you have permission to redistribute those fields. Raw inputs, expected answers, outputs, and traces are not included in the portable submission, but prompts and identifiers can still contain private information.
-
-After that review:
+Before sharing, inspect candidate text, identifiers, receipt metadata, and summaries for private data and redistribution restrictions. Complete journals, source rows, outputs, and grader reports stay private under `.evopt/`; portable exports omit raw outputs and traces but still contain text and identifiers.
 
 ```sh
-npm run experiment -- export --run .evopt/runs/reviewed-run --out contributions/my-improvement.json --id my-improvement --summary "Describe the bounded change and observed result" --reviewed
-npm run experiment -- validate --file contributions/my-improvement.json
+npm run swe -- submit --run .evopt/runs/swe-1 --out contributions/my-result --id my-result --summary "Describe the hypothesis and measured outcome" --reviewed
 ```
 
-Inspect the resulting JSON again before committing it. `--reviewed` records a contributor's review; it does not redact secrets or certify that an experiment is truthful. A completed run with settled billing is required. Synthetic and unchanged-candidate evidence remains visibly labeled and cannot establish a real improvement.
+The command writes to a new output directory:
 
-The submission contains candidate text, changes, evaluation outcomes, normalized usage, accounting, provenance, and integrity hashes. Hashes detect accidental changes; they do not prove that a provider ran the calls or that the scorer is valid. Keep original private evidence available for an agreed review process rather than committing the run directory.
+```text
+contributions/my-result/
+  submission.json   Portable configuration, lineage, outcomes, usage, and provenance
+  patch.json        Guarded text changes for explicit application
+  README.md         Result and reproduction information
+```
 
-Benchmark-backed datasets also export benchmark provenance. Include the matching shareable split manifest or its independently accessible source and exact preparation command. Reference evaluator reports may contain task prompts and model outputs: review them separately before sharing, and never replace a missing reference score with a smoke-fixture score. A custom subset result must be labeled with its task count and split policy, not advertised as an official leaderboard score.
+It does not publish, open a PR, or alter shared defaults. It requires a completed run and settled billing. `--reviewed` records your review; it does not redact secrets or certify truth. Synthetic, identity-control, and non-improving results are labeled and cannot establish a real token-saving improvement.
+
+You can validate the package again with:
+
+```sh
+npm run experiment -- validate --file contributions/my-result/submission.json
+```
 
 ## Submit an improvement
 
-Open a pull request with the reviewed JSON and enough reproducible experiment material for a maintainer to assess it. Put shareable experiment definitions and explanations under `experiments/<experiment-id>/`. Include pinned dependency/model/dataset information and preparation instructions; use placeholders or explicit injected configuration for credentials. If a dataset or agent is private, explain what maintainers can reproduce and narrow the claim accordingly.
+Open a PR yourself with the reviewed package and shareable experiment material under `experiments/<experiment-id>/`. Include preparation commands, exact task counts and partitions, source/manifest hashes, evaluator revision, model/pricing pins, and known limitations. Never commit credentials or private run directories.
 
-Report the baseline and candidate results, task count, actual accounted cost, rejected proposals, and any regressions. Distinguish a smoke demonstration, an identity control, and independent baseline/candidate observations. Do not call a tiny fixture suite a public benchmark, infer statistical significance from one run, or remove difficult cases after seeing results.
+Report observed token savings and quality alongside cost. Custom SWE subsets are not official leaderboard results. Hashes and internally consistent receipts are integrity checks, not proof that a provider ran the calls or that a score is authentic.
 
-Maintainers validate the package, review the text changes and experiment code, and independently rerun an accepted experiment with an explicitly approved budget. A new comparison needs a fresh holdout that has not influenced human or automated selection. Shared test results cannot remain hidden after contributors use them to choose the next variant.
+Maintainers validate the package, inspect the text change and experiment code, and independently reproduce the result under a separately approved budget. Adoption is a human decision: record the accepted patch, parent baseline, evidence, and new version. Later tuning needs a fresh holdout after earlier test results have informed decisions.
 
-Promotion is a separate human decision. If accepted, commit the reviewed configuration as the next versioned baseline and preserve its parent version and evidence reference. Start subsequent search from that baseline on new evaluation data. This is the contribution cycle by which configurations evolve; no submission automatically merges itself, edits runtime code, or deploys a new default.
+## Other experiments and library contributions
 
-## Repository boundaries
+`npm run demo` and `npm test` are offline. The demo uses explicit accuracy selection to illustrate integration; it does not establish measured token savings.
 
-Keep ordinary library fixes separate from optimization evidence. Model-proposed changes are limited to declared text components; tool implementations, permissions, graph topology, model weights, and arbitrary source code are outside the optimization scope. Do not publish this working package or claim name clearance.
+For non-SWE tasks, use `npm run experiment -- init --out .evopt/experiment.mjs` and the [general experiment workflow](experiments/README.md). A trusted experiment exports `id`, `description`, `agent`, `dataset`, and an optional objective. Omitted objectives default to `"tokens"`; explicit `"accuracy"` remains supported.
+
+Choose contributor assistants and providers through [INTEGRATIONS.md](INTEGRATIONS.md). Keep library fixes separate from optimization evidence. Only declared prompts and tool descriptions are candidate edits; runtime code, permissions, topology, and model weights remain outside scope. Do not publish the working package or claim name clearance.
 

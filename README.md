@@ -1,12 +1,41 @@
 # Evopt
 
-Evopt improves an existing TypeScript agent's **prompts and tool descriptions**, then returns a configuration patch and evidence for review.
+Evopt searches for **prompt and tool-description changes that reduce your agent's token use while preserving measured task quality**. It returns a configuration patch and evidence you can review.
 
-You keep your agent, tools, models, and workflow. Evopt proposes bounded text edits, evaluates them on labeled tasks, and helps you decide which changes to adopt.
+Your existing agent keeps its runtime, models, tools, and workflow. Evopt changes only the text you explicitly allow.
 
-## The API
+## Use your agent on SWE-bench
 
-After explicitly configuring an [agent adapter and dataset](API.md#complete-offline-example), the optimization call is:
+With Node.js 22 or newer, install this checkout and connect your existing agent in `my-agent.mjs`:
+
+```sh
+npm install
+npm run swe -- init --out .evopt/swe-config.json --agent ./my-agent.mjs
+```
+
+The command creates a draft configuration. Follow the [agent connection example](experiments/swe-bench/README.md#connect-your-agent) and [benchmark preparation](benchmarks/README.md#prepare-swe-bench) to fill in your local dataset, repositories, Python, pinned harness, and Docker resources. No agent runtime or benchmark assets are installed automatically.
+
+Check the setup, then run with a USD ceiling you have explicitly approved:
+
+```sh
+npm run swe -- check --config .evopt/swe-config.json --budget 10
+npm run swe -- run --config .evopt/swe-config.json --budget 10 --out .evopt/runs/swe-1 --allow-paid
+npm run swe -- review --run .evopt/runs/swe-1
+```
+
+`--budget 10` caps accounted inference spending at **USD 10**; it is not an iteration count. Add `--max-tokens 200000` to both `check` and `run` if you also want a total token ceiling. These example amounts are not spending authorization. The [accounting contract](API.md#usd-accounting-contract) covers target calls and proposals; local Docker compute and storage are separate.
+
+After reviewing the result and its contents for sharing:
+
+```sh
+npm run swe -- submit --run .evopt/runs/swe-1 --out contributions/my-result --id my-result --summary "Describe the change and measured result" --reviewed
+```
+
+This writes a local package containing `submission.json`, `patch.json`, and a reproduction README. It does not publish or open a pull request. See [the contributor guide](CONTRIBUTING.md) for review, recovery, and adoption.
+
+## The library API
+
+After explicitly defining an [agent adapter and labeled dataset](API.md#complete-offline-example):
 
 ```ts
 import { optimize } from "evopt";
@@ -14,84 +43,50 @@ import { optimize } from "evopt";
 const result = await optimize({
   agent,
   dataset,
-  objective: "accuracy",
+  objective: "tokens", // The default; this property may be omitted.
   budget: 10,
 });
 ```
 
-`agent` includes its runner, mutable fields, usage accounting, and proposer. `dataset` includes separate train, validation, and test cases. There are no hidden globals or default paid providers. See the [complete offline example](examples/offline.ts).
-
-`budget: 10` means a **USD 10 total run ceiling** covering proposals and evaluations under the [accounting contract](API.md#usd-accounting-contract). It is not ten iterations or permission to spend money.
+The adapter supplies its runner, mutable fields, usage accounting, and proposer. The dataset supplies disjoint train, validation, and test cases. There are no hidden globals or default paid providers. Explicit `objective: "accuracy"` remains available.
 
 ## Three core ideas
 
-- **Understand the declared agent.** Node roles, tool contracts, and handoffs give proposals context. Only allowlisted prompts and descriptions can change; tool implementations and graph topology stay fixed.
-- **Keep quality first.** Default selection improves validation accuracy. An optional policy selects equally accurate candidates with lower USD cost or token use, subject to an accuracy floor and per-case regression limits.
-- **Learn from earlier attempts.** Later proposals receive bounded training comparisons and rejection feedback. Candidate lineage records what changed, its parent, and the proposal that produced it.
-
-See [configuration, selection, and training experience](CONFIGURATION.md) to declare these settings. This is an optimization layer, not a new agent runtime.
-
-## How improvement works
+- **Agent-aware edits.** Node roles, tool contracts, and handoffs give proposals context. Only allowlisted prompts and descriptions change.
+- **Fewer tokens, preserved quality.** Default selection requires strictly fewer validation tokens, at least baseline accuracy, and zero regressions on cases the baseline passed. Higher accuracy alone is not a token-saving win.
+- **Learning from attempts.** Proposals receive bounded training comparisons and rejection feedback. Lineage records each candidate's parent, changed fields, and proposal invocation.
 
 ```text
-Baseline → propose on training cases → select on validation → freeze
+Baseline → propose on training → select on validation → freeze
          → compare on held-out tests → review and reproduce → adopt
 ```
 
-The target agent never receives expected answers or scoring functions. Validation and test observations stay outside proposal feedback. Your adapter creates fresh agent state for every evaluation.
+The target never receives labels or scoring functions. Validation and test observations stay outside proposal feedback. Your adapter creates fresh state for every evaluation. Adoption is explicit; Evopt does not modify production agents or optimize its own implementation.
 
-A run returns before/after text, paired outcomes, regressions, uncertainty, and settled costs. You decide whether to apply its guarded patch and record a new baseline version. Use fresh held-out cases once previous test results have informed further tuning.
+See [configuration and review](CONFIGURATION.md) for quality guards, training experience, and guarded patch application.
 
-Evopt does not modify production agents or optimize its own implementation. Repeated evaluations and evidence of text reaching actual model requests are future work. Baseline adoption is explicit.
-
-## Try it locally
-
-From this checkout, with Node.js 22 or newer:
+## Try the offline demo
 
 ```sh
-npm install
 npm run demo
 npm test
 ```
 
-The demo and tests are offline and make no paid provider calls. The demo writes private evidence under `.evopt/runs/`. Benchmark tests need Git with a configured user identity; Python-dependent evaluator tests run when Python is available.
+These make no paid provider calls. The demo illustrates wiring with an explicit accuracy objective; it is not evidence of real token savings. Tests use authored fixtures. Benchmark tests need configured Git identity; Python-dependent tests run when Python is available.
 
-## Contribute an experiment
+## Support and reference
 
-Contributors can improve agent text, add task suites or adapters, and submit reproducible results. Start with a free local experiment:
+**SWE-bench, Lite, and Verified are implemented** using a pinned local official harness. FrontierCode, Terminal-Bench, and SWE-Atlas-QnA-AA are assessed but not implemented; inspect the [benchmark catalog](benchmarks/RESEARCH.md) or run `npm run benchmark -- list`.
 
-```sh
-npm run experiment -- init --out .evopt/experiment.mjs
-npm run experiment -- check --config .evopt/experiment.mjs --budget 10
-npm run experiment -- run --config .evopt/experiment.mjs --budget 10 --out .evopt/runs/first
-npm run experiment -- review --run .evopt/runs/first
-```
+OpenAI, Anthropic, Gemini, compatible endpoints, and offline proposers are available. [Integration options](INTEGRATIONS.md) distinguish model adapters from contributor assistants such as Codex, Claude Code, and Cursor. Assistant presets do not supply a target-agent runtime.
 
-The generated experiment is synthetic. Real paid runs require your explicit budget and `--allow-paid`; none are launched by these instructions alone. Keep unsuccessful results alongside improvements.
-
-Follow [CONTRIBUTING.md](CONTRIBUTING.md) to prepare a real experiment, resume a run, export a reviewed patch, and submit evidence. [Experiments](experiments/README.md) contains shareable definitions.
-
-## Integrations and benchmarks
-
-Use your existing agent through a developer-supplied adapter. OpenAI, Anthropic, Gemini, explicitly configured compatible endpoints, and deterministic offline proposers are available. OpenAI and Anthropic configuration maps connect declared text to their request formats.
-
-[Contributor assistant presets](INTEGRATIONS.md) include Codex, Claude Code, Cursor, Gemini CLI, and others. Those presets help operate Evopt; they do not supply an evaluated agent runtime.
-
-**SWE-bench, Lite, and Verified are implemented** through a pinned local official harness. Your existing coding agent receives a fresh repository, produces a patch, and the Docker harness grades it. Follow [benchmark preparation](benchmarks/README.md) and the [SWE-bench experiment](experiments/swe-bench/README.md).
-
-FrontierCode, Terminal-Bench, and SWE-Atlas-QnA-AA are assessed but **not implemented**. Inspect the [catalog and requirements](benchmarks/RESEARCH.md), or run `npm run benchmark -- list`. Offline fixtures demonstrate integration behavior, not real benchmark gains.
-
-## Reference
-
-- [API and complete setup](API.md): generic types, adapters, search, accounting, recovery, and the optional OpenAI proposer.
-- [Configuration and review](CONFIGURATION.md): agent structure, selection policies, training experience, evidence, and guarded patches.
-- [Contribution workflow](CONTRIBUTING.md): explicit budgets, reviewed exports, and reproduction.
+- [API reference](API.md): complete setup, generic types, accounting, evidence, and recovery.
+- [SWE setup](experiments/swe-bench/README.md): connect your own agent and configure the local evaluator.
+- [Contributing](CONTRIBUTING.md): create a reviewed evidence package and reproduce a result.
 - [Source](src/) · [Examples](examples/) · [Benchmarks](benchmarks/) · [Tests](test/).
 
 ## Scope and status
 
-Evopt is an unpublished working implementation. A Python package already uses the name `evopt`; no package-name or trademark clearance is claimed.
+Evopt is unpublished. A Python package already uses the name `evopt`; no name or trademark clearance is claimed. GEPA, DSPy, Ax, and Opik provide relevant prior work; Evopt claims no new optimization algorithm or first-of-its-kind status.
 
-GEPA, DSPy, Ax, and Opik provide relevant prior work. Evopt claims neither a new optimization algorithm nor the first framework-agnostic or TypeScript optimizer.
-
-Scope is prompt and tool-description optimization. There is no arbitrary code generation, graph rewriting, model training, dashboard, SaaS account system, distributed execution, or online production self-modification.
+Scope is prompt and tool-description optimization. There is no arbitrary code generation, graph rewriting, model training, dashboard, SaaS account system, distributed execution, or production self-modification. Repeated evaluation and model-request attestation remain future work.

@@ -4,7 +4,7 @@ This reference covers explicit setup, integration, selection, accounting, eviden
 
 ## Complete offline example
 
-The package root exports `defineAgent`, `optimize`, `exactMatch`, `createOfflineProposer`, `accuracyStrategy`, and public TypeScript types. This complete example needs no credentials or global SDK configuration:
+The package root exports `defineAgent`, `optimize`, `exactMatch`, `createOfflineProposer`, `accuracyStrategy`, and public TypeScript types. This complete example needs no credentials or global SDK configuration. It explicitly selects accuracy to demonstrate a text change; a free fixture with no token receipts cannot establish token savings:
 
 ```ts
 import {
@@ -63,7 +63,9 @@ console.log(result.status, result.changes, result.test, result.directory);
 
 All three partitions must be nonempty, with globally unique case ids and no identical inputs across partitions. Inputs and outputs must be JSON-serializable data suitable for durable evidence. The local scorer receives `{ input, output, expected }` and returns a boolean, optionally asynchronously. It must be deterministic and free of paid calls. Use an application-specific scorer where exact matching is unsuitable. Increase `dataset.version` when changing scoring behavior. Component `maxLength` uses JavaScript string length (UTF-16 code units).
 
-Only `objective: "accuracy"` is initially supported. Invalid budgets, missing mutable components, malformed datasets, unsupported objectives, and incomplete paid accounting settings fail before provider dispatch.
+Omitting `objective` defaults to `"tokens"`; explicit `"tokens"` and `"accuracy"` are supported. Token optimization requires strictly fewer validation tokens while meeting baseline quality guards. Higher accuracy alone does not win under that objective. Invalid budgets, missing mutable components, malformed datasets, unsupported objectives, and incomplete paid accounting settings fail before provider dispatch.
+
+`budget` is always a USD ceiling. Optionally add `run: { maxTokens: 200000 }` to `optimize` for a separate total token ceiling covering target and proposer calls. Choose both limits explicitly; the number here is illustrative, not authorization.
 
 ## Public types and configuration
 
@@ -72,6 +74,8 @@ Generic input and output types flow through `defineAgent<I, O>`, `Agent<I, O>`, 
 `defineAgent` captures the stable agent id and implementation version, initial components, mutable roles/length limits, runner callback, invocation accounting, and explicit optimization settings. Use `optimization.maxAttempts` to bound proposal attempts independently of the USD ceiling. There is no implicit proposer or global SDK setup.
 
 The package root also exports configuration mapping and patch helpers, evidence analysis, experiment/contribution helpers, `SelectionPolicy`, `TrainingExperience`, and `CandidateLineage`. See [the public exports](src/index.ts) and [type definitions](src/types.ts) for the complete contract.
+
+For SWE-bench, `loadSWEExperiment(configPath)` reads an explicit JSON configuration, verifies local evaluator resources, then imports its named agent export and returns a tokens-objective experiment. It is also the loader behind `npm run swe`; see [SWE setup](experiments/swe-bench/README.md).
 
 Optional `AgentStructure` declares nodes, tools, and handoffs. `mapOpenAIChatConfiguration` and `mapAnthropicConfiguration` map its named text into provider configuration; they make no requests or tool calls. See [structured configuration](CONFIGURATION.md).
 
@@ -103,26 +107,29 @@ An adapter callback is trusted code. Evopt cannot prevent it from capturing labe
 
 The default strategy is bounded mutation and selection, with ten proposal attempts unless `optimization.maxAttempts` changes it. Execution is sequential, with one evaluation per case and candidate. The proposer is separate from the runner. It receives current mutable text, its specifications, optional agent structure, the selection policy, current-incumbent labeled training feedback, and bounded training experience across earlier candidates and rejections. The experience projection includes per-case outcomes, resource comparisons, mutable edits, and lineage; it omits raw historical outputs. Validation and test observations never enter proposals.
 
-Each proposal is a patch containing allowlisted component keys. Invalid, oversized, empty, and duplicate proposals are recorded without candidate evaluation. Baseline and valid candidates receive train and validation evaluations. Default selection uses complete validation accuracy and retains the incumbent on ties. The optional resource policy permits strictly cheaper equal-accuracy candidates that pass its quality guards. An optional `optimization.strategy` can replace default selection through the exported `SearchStrategy` interface; it receives summaries, not test results. Custom strategies must select a completely evaluated candidate without reducing validation accuracy, retain the incumbent on ties, and cannot be combined with the resource policy.
+Each proposal is a patch containing allowlisted component keys. Invalid, oversized, empty, and duplicate proposals are recorded without candidate evaluation. Baseline and valid candidates receive train and validation evaluations. The default tokens objective requires strictly lower validation token use, at least baseline validation accuracy, and zero regressions on baseline-passing cases. Equal-token candidates retain the incumbent even if accuracy improves.
+
+Explicit `objective: "accuracy"` retains accuracy-first selection: higher validation accuracy wins and ties retain the incumbent. An optional `optimization.strategy` can replace that accuracy selector through the exported `SearchStrategy` interface; it receives summaries, not test results. Custom strategies must select a completely evaluated candidate without reducing incumbent validation accuracy, retain the incumbent on ties, and cannot be combined with token optimization or a resource policy.
 
 After search, Evopt freezes the winner and evaluates baseline and winner on test in paired, alternating order. Test scores do not change selection. An unchanged winner is labeled an identity control rather than two independent observations. Reusing the same test set for subsequent human-guided tuning destroys its held-out status.
 
 Results contain selected components, before/after changes, candidate history and lineage, normalized selection/experience settings, per-case evaluations, test accuracy, accounting entries, provenance, and completion or interruption status. Inspect `status` and `reason` before interpreting evidence.
 
-`analyzeEvidence(result)` and `experiment review` report paired wins/losses, improved and regressed case IDs, Wilson accuracy intervals, a conservative paired accuracy-difference interval, an exact McNemar comparison, and observed settled costs. A one-case gain can coexist with a wide interval; one evaluation per case cannot quantify repeated-model variance. Identity controls reuse the same observations once and make no independent comparison claim.
+`analyzeEvidence(result)`, `swe review`, and `experiment review` report paired wins/losses, improved and regressed case IDs, accuracy intervals, an exact McNemar comparison, token savings/per-case deltas, and observed settled costs. The token-delta interval is a descriptive fixed-seed bootstrap over task pairs, not proof of repeatable savings; it is `null` for identity controls or fewer than two pairs. One evaluation per case cannot quantify model rerun variance. See [methods and assumptions](CONFIGURATION.md#inspect-evidence-and-export-a-patch).
 
 Contribution exports include this recomputable review and, for runs with the configuration contract, a guarded text patch. Validation recomputes statistics and edits from the evidence. Promotion eligibility checks accounting and regression rules; it is not a significance or authenticity certificate. See [evidence methods and assumptions](CONFIGURATION.md#inspect-evidence-and-export-a-patch). Reviewers reproduce a candidate before adopting it in their own application.
 
 ### Selection policy and training experience
 
-The default `optimization.selection` is `{ kind: "accuracy" }`. To select cheaper equal-accuracy candidates, explicitly configure:
+For the default `objective: "tokens"`, the normalized policy is `{ kind: "quality-constrained-resource", metric: "tokens", ranking: "resource-first", minValidationAccuracy: 0, maxRegressions: 0 }`. The effective accuracy floor is the greater of baseline accuracy and the configured minimum. To add a stricter floor, configure:
 
 ```ts
 optimization: {
   proposer, // The explicit proposer already configured for your adapter.
   selection: {
     kind: "quality-constrained-resource",
-    metric: "usd", // Or "tokens".
+    metric: "tokens",
+    ranking: "resource-first",
     minValidationAccuracy: 0.9,
     maxRegressions: 0,
   },
@@ -130,7 +137,11 @@ optimization: {
 }
 ```
 
-The resource policy requires its accuracy floor and limits regressions on cases the original baseline passed. Accuracy stays primary; a higher-accuracy candidate may cost more. Equal accuracy requires a strict improvement in the chosen validation resource. USD uses settled evaluation charges; tokens count input plus output once. Cached input and reasoning are subsets, so they are not added twice. Failure costs count, and a success on another case does not cancel a baseline regression. Custom strategies cannot be combined with this policy.
+Resource-first selection requires strictly less of the chosen resource, its accuracy floor, and no more than the permitted baseline-case regressions. It may give up accuracy gains beyond the original baseline in exchange for fewer tokens; the original baseline remains the quality reference. A success on another case does not cancel a regression. Token optimization accepts only token/resource-first policies and cannot be combined with a custom strategy.
+
+For explicit `objective: "accuracy"`, the default policy is `{ kind: "accuracy" }`. An explicit resource policy can instead choose `metric: "usd"` or `"tokens"` and `ranking: "accuracy-first"` or `"resource-first"`. Omitting `ranking` in such an explicit policy preserves the earlier accuracy-first behavior: resource use only breaks accuracy ties. Declare the objective and ranking together so the intended trade-off is clear.
+
+USD uses settled evaluation charges; tokens count input plus output once. Cached input and reasoning are subsets, so they are not added twice. All validation cases, including failures, contribute to the totals. Proposal costs count toward the run ceiling, not a candidate's validation cost.
 
 The experience settings above are defaults. They bound whole observations and rejection facts, with omitted counts when records do not fit. The experience cap does not bound the rest of the proposal request. Candidate lineage records the parent, attempt, proposal invocation, operator, and changed keys; history retains the corresponding proposal facts. Normalized settings are retained in `result.configuration` and the run fingerprint. See [limits and fields](CONFIGURATION.md#selection-and-training-experience).
 
@@ -168,6 +179,10 @@ Results return `usage: { complete: true, receipts: [...] }`. Each receipt identi
 Accounting uses integer millionths of USD. Token charges are summed across an invocation's receipts and then rounded upward; non-token charges and reservations round upward, and the budget rounds downward. Sub-micro-unit and unsafe budgets are rejected. Before dispatch, Evopt durably reserves the invocation bound. Complete receipts settle it; uncertain billing leaves it reserved and stops the run. Envelope violations are recorded and stop further dispatch instead of being presented as successful budget compliance. If a callback declared free reports paid usage, the run is blocked from resuming: reported non-token charges are retained, but token costs cannot be determined without its missing tariff.
 
 Before search, Evopt protects budget for both final test arms. Preflight fails without spending if baseline and final evaluation cannot fit. Search stops when its next work cannot fit while preserving that allowance. Unused completed-call reservations become available after settlement.
+
+If `run.maxTokens` is configured, it independently caps total normalized input plus output tokens across target and proposer calls. Per-invocation input/output limits determine conservative token reservations, including protected final-evaluation bounds. Cached input and reasoning are counted within their parent categories once. Use the same ceiling on resume; USD and token ceilings do not substitute for each other.
+
+If an integration violates its contract with malformed receipts, the interrupted result retains those receipts and its reason. `occupiedTokens` is omitted when no valid total can be computed; this is unknown usage, not zero. Such a run cannot resume automatically or be exported as completed evidence.
 
 The ceiling is conditional on truthful, enforced adapter bounds and declared pricing. The ledger is not a provider invoice or a guarantee against misconfigured or malicious callbacks. Currency conversion, tariff changes during a run, and unmetered paid judges are unsupported.
 
