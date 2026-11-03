@@ -25,6 +25,12 @@ Choose cases before a run. Use train feedback for proposals, validation for sele
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the free scaffold, explicit paid-run authorization, export, and review commands. A synthetic demo illustrates the workflow; it does not establish an optimization claim.
 
+## Benchmark experiments
+
+[SWE-bench](swe-bench/README.md) follows the OPS-GA workflow: import pinned instances, run your existing coding agent in a fresh repository checkout, and grade its patch with the official Docker harness. It supports the SWE-bench, Lite, and Verified dataset families through a compatible pinned evaluator. The optimizer changes only declared prompts and tool descriptions.
+
+SWE experiments use explicitly selected disjoint train/validation/test groups and carry benchmark provenance into contribution evidence. See [benchmark preparation](../benchmarks/README.md) before choosing a paid run budget and [the benchmark catalog research](../benchmarks/RESEARCH.md) for other software-engineering suites.
+
 ## Opt-in OpenAI text experiment
 
 [`openai-text.mjs`](openai-text.mjs) supplies a working target-agent callback and the optional OpenAI proposer. It makes one text completion per target evaluation, with a fresh message list, no tools or retries, explicit token limits, and normalized usage. The only mutable field is its system prompt. It uses six public category-normalization fixtures; these test integration wiring, not general agent performance. Improvement is not guaranteed, and a paid result on these fixtures is still only smoke evidence.

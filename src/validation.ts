@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { Accounting, Agent, Components, OptimizeOptions, UsageReceipt } from './types.js';
+import type { Accounting, Agent, BenchmarkProvenance, Components, OptimizeOptions, UsageReceipt } from './types.js';
+import { validateStructure } from './structure.js';
 
 export function assert(value: unknown, message: string): asserts value { if (!value) throw new Error(message); }
 export function record(x: unknown): x is Record<string, unknown> {
@@ -71,13 +72,7 @@ export function price(a: Accounting, receipts: UsageReceipt[]): number {
 }
 export function validateAgent<I, O>(a: Agent<I, O>): void {
   assert(record(a), 'Missing agent'); text(a.id); text(a.version);
-  assert(record(a.components) && Object.keys(a.components).length > 0, 'Missing components');
-  for (const [k,v] of Object.entries(a.components)) { assert(!['__proto__','constructor','prototype'].includes(k), 'Unsafe component key'); assert(typeof v === 'string', 'Components must be text'); }
-  assert(record(a.mutable) && Object.keys(a.mutable).length > 0, 'Missing mutable components');
-  for (const [k,s] of Object.entries(a.mutable)) {
-    assert(Object.hasOwn(a.components, k), 'Mutable component missing'); assert(record(s), 'Invalid mutable specification'); text(s.role); integer(s.maxLength, 1);
-    assert(a.components[k]!.length <= s.maxLength, 'Initial component exceeds length');
-  }
+  validateStructure(a);
   assert(typeof a.run === 'function', 'Missing runner'); validateAccounting(a.accounting);
   assert(record(a.optimization), 'Missing optimization settings'); const p = a.optimization.proposer;
   assert(record(p) && typeof p.propose === 'function', 'Missing proposer'); text(p.id); text(p.version); validateAccounting(p.accounting);
@@ -88,6 +83,7 @@ export function validateOptions<I, O>(o: OptimizeOptions<I, O>): void {
   assert(record(o), 'Missing options'); validateAgent(o.agent);
   assert(o.objective === 'accuracy', 'Unsupported objective'); assert(micros(o.budget, false) > 0, 'Budget must be at least one USD micro-unit');
   const d = o.dataset; assert(record(d), 'Missing dataset'); text(d.id); text(d.version); assert(typeof d.score === 'function', 'Missing local scorer');
+  if (d.benchmark !== undefined) validateBenchmarkProvenance(d.benchmark);
   const ids = new Set<string>(); const inputs = new Map<string,string>();
   for (const split of ['train','validation','test'] as const) {
     assert(Array.isArray(d[split]) && d[split].length > 0, 'Partitions must be nonempty');
@@ -98,6 +94,16 @@ export function validateOptions<I, O>(o: OptimizeOptions<I, O>): void {
       assert(!inputs.has(key) || inputs.get(key) === split, 'Input duplicated across partitions'); inputs.set(key, split);
     }
   }
+}
+export function validateBenchmarkProvenance(value: unknown): asserts value is BenchmarkProvenance {
+  assert(record(value), 'Invalid benchmark provenance'); text(value.id); text(value.metric);
+  assert(Object.keys(value).every(k => ['id','sourceRevision','sourceSha256','manifestSha256','metric','splitPolicy','evaluator'].includes(k)), 'Unexpected benchmark metadata');
+  assert(value.splitPolicy === 'custom-disjoint', 'Unsupported benchmark split policy');
+  for (const key of ['sourceSha256', 'manifestSha256']) assert(typeof value[key] === 'string' && /^[a-f0-9]{64}$/.test(value[key]), 'Invalid benchmark digest');
+  assert(typeof value.sourceRevision === 'string' && /^[a-f0-9]{40}$/.test(value.sourceRevision), 'Invalid source revision');
+  assert(record(value.evaluator), 'Missing benchmark evaluator'); text(value.evaluator.name);
+  assert(Object.keys(value.evaluator).every(k => ['name','revision'].includes(k)), 'Unexpected evaluator metadata');
+  assert(typeof value.evaluator.revision === 'string' && /^[a-f0-9]{40}$/.test(value.evaluator.revision), 'Invalid evaluator revision');
 }
 export function applyPatch(components: Components, mutable: Agent<unknown, unknown>['mutable'], patch: unknown): Components {
   assert(record(patch) && Object.keys(patch).length > 0, 'Proposal must contain text edits');

@@ -6,6 +6,8 @@ import { checkExperiment, runExperiment, experimentStatus, readExperimentResult,
 import { buildSubmission, validateSubmission } from '../dist/src/contributions.js';
 import { listAssistants, resolveAssistant, renderAssistantBrief } from '../dist/src/assistants.js';
 import { listProviders, resolveProvider, listFrameworkBridges } from '../dist/src/integrations.js';
+import { analyzeEvidence } from '../dist/src/evidence.js';
+import { createConfigurationPatch } from '../dist/src/patch.js';
 
 const help = `Evopt contributor experiments: bounded text optimization for any configured agent.
   integrations                               Show providers, assistants, and SDK support boundaries
@@ -15,6 +17,8 @@ const help = `Evopt contributor experiments: bounded text optimization for any c
   check     --config <experiment.mjs> [--budget <USD>]   Validate and show cost bounds
   run       --config <experiment.mjs> --budget <USD> --out <run-dir> [--allow-paid] [--resume]
   status    --run <run-dir>                   Read checkpoint without loading an agent
+  review    --run <run-dir>                   Paired uncertainty, costs, and regressions
+  patch     --run <run-dir> --out <patch.json> --reviewed  Export guarded configuration edits
   export    --run <run-dir> --out <submission.json> --id <id> --summary <text> --reviewed
   validate  --file <submission.json>          Validate portable evidence; no inference
 Paid runs require both an explicit budget and --allow-paid. No default budget or provider.
@@ -23,7 +27,7 @@ Export --reviewed attests that the contributor reviewed the included text and id
 No command publishes, merges, installs, or changes a production configuration.`;
 const allowed = {
   integrations: [], onboard: ['assistant','out'], init: ['out','provider','settings'], check: ['config','budget'], run: ['config','budget','out','allow-paid','resume'],
-  status: ['run'], export: ['run','out','id','summary','reviewed'], validate: ['file'],
+  status: ['run'], review: ['run'], patch: ['run','out','reviewed'], export: ['run','out','id','summary','reviewed'], validate: ['file'],
 };
 const flags = new Set(['allow-paid','resume','reviewed']);
 function required(options, key) { if (typeof options[key] !== 'string' || !options[key].trim()) throw new Error(`--${key} required`); return options[key]; }
@@ -134,6 +138,14 @@ async function main() {
     } finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }
   }
   if (command === 'status') result = await experimentStatus(required(o, 'run'));
+  if (command === 'review') result = analyzeEvidence(await readExperimentResult(required(o, 'run')));
+  if (command === 'patch') {
+    if (!o.reviewed) throw new Error('Patch export requires --reviewed after reviewing text and identifiers for sharing');
+    const output = required(o, 'out');
+    const patch = createConfigurationPatch(await readExperimentResult(required(o, 'run')));
+    await writeNewFile(output, JSON.stringify(patch, null, 2) + '\n');
+    result = { patch: resolve(output), digest: patch.digest, edits: patch.edits.length, inferenceRun: false };
+  }
   if (command === 'export') {
     if (!o.reviewed) throw new Error('Export requires --reviewed after reviewing text, identifiers, and receipts for privacy');
     const output = required(o, 'out'), id = required(o, 'id'), summary = required(o, 'summary');

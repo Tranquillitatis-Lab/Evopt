@@ -23,6 +23,10 @@ const response = (content = '{"prompt":"improved"}', rest: Record<string, unknow
 
 test('Gemini requests use stateless Interactions and account for cached input plus thinking', async () => {
   let calls = 0;
+  const structuredRequest = { ...request, components: { ...request.components, lookupDescription: 'PRIVATE-TOOL-TEXT' },
+    mutable: { prompt: { ...request.mutable.prompt, kind: 'prompt' as const, target: { type: 'node' as const, id: 'planner' } } },
+    structure: { version: 1 as const, nodes: [{ id: 'planner', role: 'Retrieve verified records', promptKeys: ['prompt', 'secretImmutable'], toolIds: ['lookup'] }],
+      tools: [{ id: 'lookup', descriptionKey: 'lookupDescription', inputSchema: { type: 'object', properties: { query: { type: 'string' } } }, constraints: ['Read-only'] }], handoffs: [] } };
   const proposer = createGeminiProposer({ ...options, fetch: async (url, init) => {
     calls++;
     assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/interactions');
@@ -48,11 +52,16 @@ test('Gemini requests use stateless Interactions and account for cached input pl
     assert.deepEqual(body.response_format.schema.required, ['prompt']);
     assert.equal(body.response_format.schema.additionalProperties, false);
     assert.equal(JSON.stringify(body).includes('do-not-send'), false);
-    assert.deepEqual(JSON.parse(body.input).feedback, request.feedback);
+    assert.equal(JSON.stringify(body).includes('PRIVATE-TOOL-TEXT'), false);
+    const payload = JSON.parse(body.input);
+    assert.deepEqual(payload.feedback, request.feedback);
+    assert.deepEqual(payload.structure, structuredRequest.structure);
+    assert.deepEqual(payload.components, { prompt: 'original' });
+    assert.deepEqual(payload.mutable.prompt.target, { type: 'node', id: 'planner' });
     return response();
   } });
   assert.equal(calls, 0);
-  const result = await proposer.propose(request, context());
+  const result = await proposer.propose(structuredRequest, context());
   assert.equal(calls, 1);
   assert.deepEqual(result.output, { prompt: 'improved' });
   assert.deepEqual(result.usage.receipts[0], {

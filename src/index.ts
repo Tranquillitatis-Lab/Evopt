@@ -8,3 +8,10 @@ export { listAssistants, resolveAssistant, renderAssistantBrief } from './assist
 export type { AssistantId, AssistantPreset } from './assistants.js';
 export { listProviders, resolveProvider, listFrameworkBridges } from './integrations.js';
 export type { ProviderId } from './integrations.js';
+export { validateStructure, proposalContext } from './structure.js';
+export { analyzeEvidence } from './evidence.js';
+export type { EvidenceInput, EvidenceEvaluation, ReviewEvidence, EvidenceInterval, AccuracyEvidence, TestCostEvidence } from './evidence.js';
+export { createConfigurationPatch, applyConfigurationPatch, validateConfigurationPatch } from './patch.js';
+export type { ConfigurationPatch, ConfigurationEdit } from './patch.js';
+export { mapOpenAIChatConfiguration, mapAnthropicConfiguration } from './adapters.js';
+export type { OpenAIChatConfiguration, AnthropicConfiguration } from './adapters.js';

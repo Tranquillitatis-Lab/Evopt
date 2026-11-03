@@ -1,10 +1,58 @@
 # Evopt
 
-Evopt is an optimization layer for existing TypeScript agents. It proposes bounded changes to developer-declared prompts and tool descriptions, evaluates them on labeled tasks, and returns configuration changes with evidence for human review.
+Evopt helps existing TypeScript agents improve through bounded, evaluated changes to their prompts and tool descriptions. It returns a reviewable configuration patch with before/after results, uncertainty, costs, and regressions.
 
 Your adapter runs your agent. Evopt has no agent runtime or dependency on a particular agent framework. Tool implementations, schemas, permissions, model settings, and graph topology are outside the candidate's edit scope. It does not generate or execute arbitrary code, train model weights, or modify production agents.
 
 This repository is an unpublished working implementation. A Python package already uses the name `evopt`; this project makes no claim of package-name or trademark clearance.
+
+Agent-aware declarations identify node roles, tool contracts, and handoffs so proposers can tailor text changes to the existing workflow. The same representation maps to an application's actual configuration through adapters. See [configuration and review](CONFIGURATION.md) for structured declarations and the OpenAI/Anthropic configuration maps.
+
+## How Evopt evolves
+
+Evopt grows through a repeatable contribution loop. Contributors supply experiments and explicitly authorized inference budgets; maintainers accumulate reproducible evidence and adopt reviewed improvements as versioned baselines.
+
+```mermaid
+flowchart LR
+  A[Versioned baseline] --> B[Propose text edits using training cases]
+  B --> C[Select on validation cases]
+  C --> D[Freeze candidate]
+  D --> E[Paired held-out evaluation]
+  E --> F[Review gains, uncertainty, regressions, and cost]
+  F --> G[Reproduce and explicitly adopt patch]
+  G --> H[Next baseline and fresh holdout]
+  H --> B
+```
+
+Within a run, the proposer uses training feedback, validation selects the candidate, and the final test compares the frozen candidate with its starting baseline. Across runs, a maintainer decides whether the evidence justifies a new baseline. A higher score alone is insufficient: inspect which cases changed, statistical uncertainty, settled costs, and reproduction results.
+
+| What can evolve | How it happens |
+| --- | --- |
+| An agent's prompts and tool descriptions | Bounded proposals, labeled evaluation, and guarded configuration patches; implemented today |
+| Shared baseline configurations | Contributors submit reviewed evidence; maintainers reproduce and explicitly adopt a new version |
+| Framework and benchmark coverage | Contributors add tested adapters while preserving the common configuration and accounting contracts |
+| Evopt's proposers and selection strategies | Replaceable interfaces exist today; better implementations are reviewed source contributions |
+| Evopt optimizing its own proposal policy | Future work requiring dedicated experiments, comparable budgets, and independent holdouts |
+
+Node roles, graph topology, tool schemas, and handoff contracts inform text proposals and remain fixed during optimization. Improvement is measured for the configured agent and task population; one successful experiment does not establish a universal prompt.
+
+### Make an accepted result the next baseline
+
+After reviewing and reproducing a completed run, export its guarded patch. Application code can adopt it explicitly:
+
+```ts
+import { applyConfigurationPatch, defineAgent } from "evopt";
+
+// agent is the original configured adapter; reviewedPatch is its reviewed JSON patch.
+const nextComponents = applyConfigurationPatch(agent, reviewedPatch);
+const nextAgent = defineAgent({
+  ...agent,
+  version: "2", // Your application's next version identifier.
+  components: nextComponents,
+});
+```
+
+Application or Git history records the parent baseline, accepted patch digest, supporting submission, and new version. Evopt checks that the patch matches the original agent/version, baseline, allowlist, and structure; the caller owns adoption and versioning. There is no automatic promotion registry. Keep the original evidence intact, choose a fresh holdout once prior test results have informed decisions, and begin the next experiment in a new run directory. Resume is for recovering the original run, not starting another generation with a changed configuration.
 
 ## Run locally
 
@@ -16,7 +64,7 @@ npm test
 npm run demo
 ```
 
-Tests and the demo run offline without paid provider calls. The demo creates an audit directory under `.evopt/runs/`.
+Tests and the demo run offline without paid provider calls. Benchmark tests need Git with your user name and email configured; the Python evaluator integration test runs when Python is available. The demo creates an audit directory under `.evopt/runs/`.
 
 ## Contribute an optimization run
 
@@ -29,7 +77,9 @@ npm run experiment -- init --out .evopt/experiment.mjs
 npm run experiment -- check --config .evopt/experiment.mjs --budget 10
 npm run experiment -- run --config .evopt/experiment.mjs --budget 10 --out .evopt/runs/first
 npm run experiment -- status --run .evopt/runs/first
+npm run experiment -- review --run .evopt/runs/first
 # After reviewing the candidate text, identifiers, and receipts for sharing:
+npm run experiment -- patch --run .evopt/runs/first --out .evopt/first.patch.json --reviewed
 npm run experiment -- export --run .evopt/runs/first --out contributions/first.json --id first --summary "Offline workflow demonstration" --reviewed
 npm run experiment -- validate --file contributions/first.json
 ```
@@ -38,19 +88,48 @@ The generated experiment is free and synthetic. Replace its adapter and dataset 
 
 To delegate a run to your own coding assistant, give it the experiment and an explicit instruction such as: “Read CONTRIBUTING.md, check this experiment and its pinned prices, then run it with a total maximum of USD X. Stop on uncertain billing. Prepare a review package; do not publish it.” Replace X yourself. Merely reading this example grants no spending authorization.
 
-Evolution happens through reviewed, versioned configurations: a contributor proposes bounded text changes, the experiment evaluates them, reviewers reproduce the evidence, and a maintainer explicitly adopts an accepted configuration as a new baseline. Later tuning needs a fresh held-out suite. The optimizer never edits its own runtime or promotes a candidate automatically.
+Useful contributions include better agent text, a reproducible experiment, a representative task suite, an adapter with enforced accounting, a clearer proposer, or a stronger selection strategy. Record the hypothesis before examining test results and preserve unsuccessful candidates and regressions alongside improvements. The [contributor guide](CONTRIBUTING.md) explains preparation and review; [shareable experiments](experiments/README.md) describes what to commit.
 
 Repository structure:
 
 ```text
 src/             General-agent library, accounting, persistence, evidence validation
-bin/             Thin local experiment command helper
-experiments/     Shareable experiment definitions and configuration guidance
+bin/             Thin local experiment and benchmark command helpers
+experiments/     SWE-bench and other shareable experiment definitions
+benchmarks/      SWE source import, fresh workspaces, official harness, benchmark catalog
 examples/        Minimal library API examples
 contributions/   Reviewed portable submissions and contribution guidance
 test/            Offline core, accounting, workflow, and evidence tests
 .evopt/          Ignored private configurations and run evidence
 ```
+
+## Current capabilities
+
+| Capability | Current support |
+| --- | --- |
+| Portable agent configuration | Named text, explicit mutable owners/limits, nodes, roles, tool schemas, and handoffs |
+| Agent execution | Developer-supplied fresh, metered `run` adapter; generic input/output types preserved |
+| Framework configuration mapping | OpenAI Chat Completions and Anthropic Messages prompt/tool definitions |
+| Candidate proposers | OpenAI, Anthropic, Gemini, explicitly configured compatible endpoints, and deterministic offline fixtures |
+| Software-engineering evaluation | SWE-bench, Lite, and Verified through a compatible pinned local official harness |
+| Reviewable evidence | Paired outcomes, confidence intervals, regression IDs, observed costs, and guarded patches |
+| Contribution and recovery | Local CLI, private durable runs, reviewed exports, validation, and matching-run resume |
+
+Configuration maps do not supply a coding-agent runtime. Contributor-assistant presets help people operate the repository; they do not automatically turn each assistant into an evaluated target. Package tests use offline providers and authored evaluator fixtures. A passing test suite establishes integration behavior, not measured improvement on a real benchmark.
+
+## Benchmarks
+
+The [benchmarks directory](benchmarks/README.md) follows back-ops-ga's **SWE-bench** workflow: import pinned tasks, give an existing coding agent a fresh repository at the task's base commit, collect its patch, and evaluate it with the pinned official Docker harness. SWE-bench, SWE-bench Lite, and SWE-bench Verified use the same adapter. Evopt optimizes declared prompts and tool descriptions; your existing agent owns its tools, execution limits, and usage receipts.
+
+```sh
+npm run benchmark -- list
+```
+
+Follow [SWE-bench preparation](benchmarks/README.md#prepare-swe-bench) and the [SWE-bench experiment](experiments/swe-bench/README.md) to connect your agent to the USD-budgeted optimization and contribution workflow. Import a reviewed local dataset export and choose explicit disjoint train/validation/test instance IDs. Dataset hashes, manifest hashes, evaluator revisions, metric, and split policy accompany the evidence. Gold patches and hidden tests stay in private evaluator data and never enter target inputs.
+
+Provision repositories, Python dependencies, and Docker separately. Preparation and checks make no model calls; evaluation executes repository tests through the official harness and may need separately provisioned images and dependencies. Local evaluation compute and storage are outside the inference USD ceiling.
+
+The benchmark catalog also assesses FrontierCode, Terminal-Bench, and SWE-Atlas-QnA-AA; see [benchmark research](benchmarks/RESEARCH.md) for source availability and grading requirements. Custom optimization subsets are not official leaderboard submissions. Tests use authored fixtures and local mock evaluators, which do not establish public-benchmark performance.
 
 ## Explicit setup, small optimization call
 
@@ -147,7 +226,24 @@ Each proposal is a patch containing allowlisted component keys. Invalid, oversiz
 
 After search, Evopt freezes the winner and evaluates baseline and winner on test in paired, alternating order. Test scores do not change selection. An unchanged winner is labeled an identity control rather than two independent observations. Reusing the same test set for subsequent human-guided tuning destroys its held-out status.
 
-Results contain selected components, before/after changes, candidate history, per-case evaluations, test accuracy, accounting entries, provenance, and completion or interruption status. Inspect `status` and `reason` before interpreting evidence. Small datasets, single evaluations, and synthetic examples do not establish statistical significance or production improvements. Review and apply accepted changes in your own application; Evopt never deploys them.
+Results contain selected components, before/after changes, candidate history, per-case evaluations, test accuracy, accounting entries, provenance, and completion or interruption status. Inspect `status` and `reason` before interpreting evidence.
+
+`analyzeEvidence(result)` and `experiment review` report paired wins/losses, improved and regressed case IDs, Wilson accuracy intervals, a conservative paired accuracy-difference interval, an exact McNemar comparison, and observed settled costs. A one-case gain can coexist with a wide interval; one evaluation per case cannot quantify repeated-model variance. Identity controls reuse the same observations once and make no independent comparison claim.
+
+Contribution exports include this recomputable review and, for runs with the configuration contract, a guarded text patch. Validation recomputes statistics and edits from the evidence. Promotion eligibility checks accounting and regression rules; it is not a significance or authenticity certificate. See [evidence methods and assumptions](CONFIGURATION.md#inspect-evidence-and-export-a-patch). Reviewers reproduce a candidate before adopting it in their own application.
+
+## Development path
+
+The next steps should strengthen evidence and contributor reuse before broadening the runtime surface. These are development priorities, not implemented capabilities or authorization to spend money.
+
+1. **Establish reproducible SWE baselines.** Run explicitly funded experiments through existing coding-agent adapters, publish reviewed per-instance evidence, and have another contributor reproduce it. Preserve source/evaluator pins, model settings, parent baseline, costs, and regression cases. This turns the tested integration into an empirical optimization result.
+2. **Measure stability across repeated trials.** Add explicit trial counts, paired schedules, and durable trial identities. Reserve all trials in the same budget and report variation across cases and model executions. Current evaluation makes one call per case and candidate.
+3. **Meter graders through the same ledger.** Add a grader interface with enforced bounds, normalized receipts, resumable votes, and failure handling before supporting paid model judges. The current local scorer must remain free of paid calls.
+4. **Expand SWE evaluation deliberately.** Add a Terminal-Bench adapter for its Harbor environments and verifier/integrity workflow. Add SWE-Atlas-QnA-AA after metered rubric judging is available. FrontierCode requires authorized task and grader access. Each adapter needs its own tested protocol; see [benchmark research](benchmarks/RESEARCH.md).
+5. **Evaluate improvements to Evopt itself.** Make proposer instruction profiles explicitly configurable and versioned, then compare challenger proposers or selectors across several fixed agents and task suites. Match total USD ceilings, account for every nested call, compare invalid-edit rates, gains, regressions, and cost, and use independent holdouts. Today these changes are ordinary reviewed source contributions; Evopt does not run this optimization automatically.
+6. **Grow adapters from real applications.** Add an SDK bridge when it demonstrates correct component mapping, fresh sessions, cancellation, enforced accounting, and reproducible evidence. Keep integration-specific behavior in its adapter.
+
+The success criterion is a reusable configuration or optimization change that another contributor can reproduce, assess, and adopt with its trade-offs visible. Token spending is an experimental resource; evidence determines whether the project learned anything useful.
 
 ## USD accounting contract
 

@@ -98,7 +98,11 @@ export async function readExperimentResult(directory: string): Promise<Optimizat
     agentId: s.config.agent.id, agentVersion: s.config.agent.version,
     datasetId: s.config.dataset.id, datasetVersion: s.config.dataset.version,
     fingerprint: s.fingerprint, synthetic: s.config.agent.accounting.kind === 'free' && s.config.proposer.accounting.kind === 'free',
+    ...(s.config.dataset.benchmark ? { benchmark: s.config.dataset.benchmark } : {}),
   }), 'Result and checkpoint provenance differ');
+  if (s.config.exportContract === 1) assert(result.configuration !== undefined, 'Result is missing its configuration contract');
+  if (result.configuration !== undefined) assert(canonical(result.configuration) === canonical({ mutable: s.config.agent.mutable,
+    ...(s.config.agent.structure ? { structure: s.config.agent.structure } : {}) }), 'Result and checkpoint configuration differ');
   return result;
 }
 

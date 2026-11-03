@@ -25,6 +25,10 @@ The generated experiment uses a deterministic local agent and proposer. It spend
 
 ## Bring an existing agent
 
+Use [benchmarks/](benchmarks/README.md) for the SWE-bench importer, fresh repository workspaces, and pinned official evaluator. The [SWE-bench experiment](experiments/swe-bench/README.md) connects SWE-bench, Lite, or Verified tasks to your existing coding agent. Evopt changes its declared prompts and tool descriptions; that agent produces repository patches under its own enforced tool/runtime limits. Gold patches and hidden tests remain in private evaluator data.
+
+Prepare local source exports and repository snapshots, provision the official harness and Docker, then run benchmark preparation and evaluator checks before authorizing paid optimization. Preserve the source revision, file hash, split manifest, evaluator revision, container/dependency details, and official reports with the experiment evidence. Local harness compute and storage are outside the inference USD ceiling. A successful configuration check does not prove that a Docker test run will succeed.
+
 An experiment module exports an object containing `id`, `description`, `agent`, `dataset`, and `objective: "accuracy"`. Configure `agent` with `defineAgent` as shown in the [adapter guide](README.md#adapt-an-existing-agent). Its mutable allowlist should contain only the specific prompt or tool-description fields being investigated.
 
 For a reproducible experiment:
@@ -54,6 +58,8 @@ The ceiling covers target-agent evaluations and candidate proposals, including r
 
 ## Review and export
 
+Run `npm run experiment -- review --run <run-dir>` to inspect paired accuracy intervals, regression case IDs, and settled cost trade-offs. The [configuration guide](CONFIGURATION.md) describes structured roles/contracts, framework maps, statistical assumptions, and guarded patch application. After reviewing the text, `npm run experiment -- patch --run <run-dir> --out <patch.json> --reviewed` writes a standalone configuration patch.
+
 Keep private modules and full runs under `.evopt/`, which is ignored by Git. Before exporting, inspect the candidate text, identifiers, summaries, receipt metadata, and evidence you intend to share. Confirm that you have permission to redistribute those fields. Raw inputs, expected answers, outputs, and traces are not included in the portable submission, but prompts and identifiers can still contain private information.
 
 After that review:
@@ -66,6 +72,8 @@ npm run experiment -- validate --file contributions/my-improvement.json
 Inspect the resulting JSON again before committing it. `--reviewed` records a contributor's review; it does not redact secrets or certify that an experiment is truthful. A completed run with settled billing is required. Synthetic and unchanged-candidate evidence remains visibly labeled and cannot establish a real improvement.
 
 The submission contains candidate text, changes, evaluation outcomes, normalized usage, accounting, provenance, and integrity hashes. Hashes detect accidental changes; they do not prove that a provider ran the calls or that the scorer is valid. Keep original private evidence available for an agreed review process rather than committing the run directory.
+
+Benchmark-backed datasets also export benchmark provenance. Include the matching shareable split manifest or its independently accessible source and exact preparation command. Reference evaluator reports may contain task prompts and model outputs: review them separately before sharing, and never replace a missing reference score with a smoke-fixture score. A custom subset result must be labeled with its task count and split policy, not advertised as an official leaderboard score.
 
 ## Submit an improvement
 

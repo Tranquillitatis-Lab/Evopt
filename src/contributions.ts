@@ -1,5 +1,8 @@
 import type { Candidate, Components, LedgerEntry, OptimizationResult, UsageReceipt } from './types.js';
-import { assert, canonical, clone, hash, integer, micros, record, text } from './validation.js';
+import { assert, canonical, clone, hash, integer, micros, record, text, validateBenchmarkProvenance } from './validation.js';
+import { analyzeEvidence, type ReviewEvidence } from './evidence.js';
+import { createConfigurationPatch, type ConfigurationPatch } from './patch.js';
+import { validateStructure } from './structure.js';
 
 export interface SubmissionMetadata { id: string; summary: string; reviewed: boolean }
 export interface SubmissionEvaluation {
@@ -14,12 +17,15 @@ export interface Submission {
   history: OptimizationResult<unknown>['history']; evaluations: SubmissionEvaluation[];
   test: NonNullable<OptimizationResult<unknown>['test']>;
   accounting: OptimizationResult<unknown>['accounting']; provenance: OptimizationResult<unknown>['provenance'];
+  configuration?: OptimizationResult<unknown>['configuration'];
+  patch?: ConfigurationPatch; review?: ReviewEvidence;
 }
 export interface SubmissionValidation {
   id: string; digest: string; synthetic: boolean; eligibleForPromotion: boolean;
   baselineValidationAccuracy: number; candidateValidationAccuracy: number;
   baselineTestAccuracy: number; candidateTestAccuracy: number;
   evaluationCount: number; spentMicros: number; limitations: string[];
+  review: ReviewEvidence;
 }
 
 function keys(value: unknown, required: string[], optional: string[] = []): asserts value is Record<string, unknown> {
@@ -66,21 +72,24 @@ export function buildSubmission(result: OptimizationResult<unknown>, metadata: S
     accounting: { currency: result.accounting.currency, limitMicros: result.accounting.limitMicros, occupiedMicros: result.accounting.occupiedMicros,
       entries: result.accounting.entries.map(e => ({ id: e.id, purpose: e.purpose, reservedMicros: e.reservedMicros, status: e.status,
         ...(e.chargedMicros === undefined ? {} : { chargedMicros: e.chargedMicros }), receipts: (e.receipts ?? []).map(cleanReceipt) })) },
-    provenance: { agentId: p.agentId, agentVersion: p.agentVersion, datasetId: p.datasetId, datasetVersion: p.datasetVersion, fingerprint: p.fingerprint, synthetic: p.synthetic },
+    provenance: { agentId: p.agentId, agentVersion: p.agentVersion, datasetId: p.datasetId, datasetVersion: p.datasetVersion, fingerprint: p.fingerprint, synthetic: p.synthetic, ...(p.benchmark ? { benchmark: clone(p.benchmark) } : {}) },
+    review: analyzeEvidence(result),
+    ...(result.configuration ? { configuration: clone(result.configuration), patch: createConfigurationPatch(result) } : {}),
   };
   submission.digest = digest(submission); validateSubmission(submission); return clone(submission);
 }
 
 /** Reject inconsistent or over-budget evidence; assess promotion eligibility separately. */
 export function validateSubmission(value: unknown): SubmissionValidation {
-  keys(value, ['version', 'metadata', 'digest', 'baselineId', 'selectedId', 'components', 'changes', 'candidates', 'history', 'evaluations', 'test', 'accounting', 'provenance']);
+  keys(value, ['version', 'metadata', 'digest', 'baselineId', 'selectedId', 'components', 'changes', 'candidates', 'history', 'evaluations', 'test', 'accounting', 'provenance'], ['configuration','patch','review']);
   assert(value.version === 1, 'Unsupported submission version');
   const s = value as unknown as Submission;
   keys(s.metadata, ['id', 'summary', 'reviewed']);
   assert(typeof s.metadata.id === 'string' && /^[a-z0-9][a-z0-9-]{0,79}$/.test(s.metadata.id), 'Invalid submission id');
   text(s.metadata.summary); assert(s.metadata.reviewed === true, 'Submission requires explicit sharing review');
   checkedHash(s.digest); assert(s.digest === digest(s), 'Submission digest mismatch');
-  keys(s.provenance, ['agentId', 'agentVersion', 'datasetId', 'datasetVersion', 'fingerprint', 'synthetic']);
+  keys(s.provenance, ['agentId', 'agentVersion', 'datasetId', 'datasetVersion', 'fingerprint', 'synthetic'], ['benchmark']);
+  if (s.provenance.benchmark !== undefined) validateBenchmarkProvenance(s.provenance.benchmark);
   text(s.provenance.agentId); text(s.provenance.agentVersion); text(s.provenance.datasetId); text(s.provenance.datasetVersion);
   checkedHash(s.provenance.fingerprint); assert(typeof s.provenance.synthetic === 'boolean', 'Missing synthetic evidence label');
   assert(Array.isArray(s.candidates) && s.candidates.length > 0, 'Missing candidates');
@@ -92,6 +101,15 @@ export function validateSubmission(value: unknown): SubmissionValidation {
   }
   const baseline = candidates.get(s.baselineId), winner = candidates.get(s.selectedId);
   assert(baseline && winner && s.baselineId === s.candidates[0]!.id, 'Missing baseline or selected candidate');
+  if (s.configuration !== undefined) {
+    keys(s.configuration, ['mutable'], ['structure']);
+    validateStructure({ components: baseline.components, ...s.configuration });
+    for (const c of s.candidates) for (const key of Object.keys(c.components)) if (c.components[key] !== baseline.components[key]) {
+      const spec = s.configuration.mutable[key];
+      assert(spec && c.components[key]!.length <= spec.maxLength, 'Candidate violates its exported mutable contract');
+    }
+    assert(s.patch && canonical(s.patch) === canonical(createConfigurationPatch(s)), 'Exported patch differs from candidate/configuration evidence');
+  } else assert(s.patch === undefined, 'Patch requires its original configuration contract');
   for (const c of s.candidates) assert(canonical(Object.keys(c.components).sort()) === canonical(Object.keys(baseline.components).sort()), 'Candidate component keys differ from baseline');
   components(s.components); assert(canonical(s.components) === canonical(winner.components), 'Selected components disagree');
   const changes = Object.fromEntries(Object.keys(baseline.components).filter(k => baseline.components[k] !== winner.components[k]).map(k => [k, { before: baseline.components[k], after: winner.components[k] }]));
@@ -155,12 +173,14 @@ export function validateSubmission(value: unknown): SubmissionValidation {
   assert(s.test.baselineAccuracy === baselineTestAccuracy && s.test.candidateAccuracy === candidateTestAccuracy, 'Test summary disagrees with evidence');
   const baselineTest = rows(baseline.id, 'test'), winnerTest = rows(winner.id, 'test');
   const noRegressions = baselineTest.every(b => !b.passed || winnerTest.find(w => w.caseId === b.caseId)!.passed);
+  const review = analyzeEvidence({ ...s, status: 'completed' });
+  if (s.review !== undefined) assert(canonical(s.review) === canonical(review), 'Review statistics differ from per-case/ledger evidence');
   const observedPaidTarget = [...baselineTest, ...winnerTest].every(e => e.usage.some(r => r.inputTokens + r.outputTokens > 0 || (r.extraCostUSD ?? 0) > 0));
   const eligibleForPromotion = !s.provenance.synthetic && observedPaidTarget && baseline.id !== winner.id && winner.validationAccuracy! > baseline.validationAccuracy! && candidateTestAccuracy >= baselineTestAccuracy && noRegressions;
-  const limitations = ['Integrity checks do not authenticate results or provider invoices; maintainers must reproduce the experiment.', 'Tariff and mutable-allowlist enforcement require the pinned experiment configuration; they cannot be reconstructed from this result alone.'];
+  const limitations = ['Integrity checks do not authenticate results or provider invoices; maintainers must reproduce the experiment.', 'Tariff enforcement requires the pinned experiment configuration.', 'Promotion eligibility checks accounting and regression rules; it is not a statistical significance claim.', ...review.limitations];
   if (s.provenance.synthetic || !observedPaidTarget) limitations.push('Synthetic or unmetered target evidence cannot establish a real-agent improvement.');
   if (!noRegressions) limitations.push('The candidate regressed on at least one baseline-passing test case.');
   return { id: s.metadata.id, digest: s.digest, synthetic: s.provenance.synthetic, eligibleForPromotion,
     baselineValidationAccuracy: baseline.validationAccuracy!, candidateValidationAccuracy: winner.validationAccuracy!, baselineTestAccuracy, candidateTestAccuracy,
-    evaluationCount: s.evaluations.length, spentMicros: total, limitations };
+    evaluationCount: s.evaluations.length, spentMicros: total, limitations, review };
 }

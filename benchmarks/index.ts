@@ -1,0 +1,12 @@
+export { verifyHarness } from './harness.js';
+export type { HarnessPin } from './harness.js';
+export { prepareSWE, validateSWEManifest, assertSWESourceMatches } from './import-swe.js';
+export type { SWEInput, SWETask, SWEManifest, PrepareSWEOptions } from './import-swe.js';
+export { checkSWEHarness, evaluateSWE } from './swe-bench.js';
+export type { SWEHarnessOptions, SWEDatasetSelection, SWEEvaluationInput, SWEEvaluationResult } from './swe-bench.js';
+export { createSWEDataset } from './swe-adapter.js';
+export type { SWEDatasetOptions } from './swe-adapter.js';
+export { createSWEAgent, collectSWEPatch, verifySWERepositories } from './swe-workspace.js';
+export type { SWEAgentOptions } from './swe-workspace.js';
+export { listBenchmarks } from './catalog.js';
+export type { BenchmarkCatalogEntry } from './catalog.js';

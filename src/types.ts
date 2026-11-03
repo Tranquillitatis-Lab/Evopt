@@ -1,5 +1,38 @@
 export type Components = Readonly<Record<string, string>>;
-export interface MutableComponent { role: string; maxLength: number }
+export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
+/** Immutable JSON Schema metadata. Evopt does not execute schema extensions or resolve references. */
+export type JsonSchema = boolean | { readonly [key: string]: JsonValue };
+export interface ComponentTarget { readonly type: 'node' | 'tool'; readonly id: string }
+export interface MutableComponent {
+  role: string; maxLength: number;
+  /** Required together with target when the adapter declares an AgentStructure. */
+  kind?: 'prompt' | 'tool-description'; target?: ComponentTarget;
+}
+export interface AgentNode {
+  readonly id: string; readonly role: string;
+  readonly promptKeys: readonly string[]; readonly toolIds: readonly string[];
+}
+export interface AgentTool {
+  readonly id: string; readonly descriptionKey: string;
+  readonly inputSchema?: JsonSchema; readonly outputSchema?: JsonSchema;
+  readonly constraints: readonly string[];
+}
+export interface AgentHandoff {
+  readonly id: string; readonly from: string; readonly to: string;
+  readonly description: string; readonly contract?: JsonValue;
+}
+/** Public, immutable context for text optimization; no runtime behavior is defined here. */
+export interface AgentStructure {
+  readonly version: 1;
+  readonly nodes: readonly AgentNode[];
+  readonly tools: readonly AgentTool[];
+  readonly handoffs: readonly AgentHandoff[];
+}
+export interface AgentTextConfiguration {
+  components: Components;
+  mutable: Readonly<Record<string, MutableComponent>>;
+  structure?: AgentStructure;
+}
 export interface Limits {
   maxModelCalls: number; maxInputTokens: number; maxOutputTokens: number;
   maxPaidToolCalls: number; maxRetries: number; timeoutMs: number;
@@ -31,15 +64,23 @@ export interface RunContext {
   limits?: Readonly<Limits>;
 }
 export interface Case<I, O> { id: string; input: I; expected: O }
+export interface BenchmarkProvenance {
+  id: string; sourceRevision: string; sourceSha256: string; manifestSha256: string;
+  metric: string; splitPolicy: 'custom-disjoint'; evaluator: { name: string; revision: string };
+}
 export interface Dataset<I, O> {
   id: string; version: string;
   train: readonly Case<I, O>[]; validation: readonly Case<I, O>[]; test: readonly Case<I, O>[];
   /** Local deterministic scorer; its version is covered by dataset.version. */
   score: (args: { input: I; output: O; expected: O }) => boolean | Promise<boolean>;
+  /** Evidence metadata only; never forwarded to target invocations. */
+  benchmark?: BenchmarkProvenance;
 }
 export interface TrainingFeedback<I, O> { caseId: string; input: I; expected: O; output: O; passed: boolean }
 export interface ProposalRequest<I, O> {
   components: Components; mutable: Readonly<Record<string, MutableComponent>>;
+  /** Roles, contracts, and fixed topology; contains references rather than immutable prompt text. */
+  structure?: AgentStructure;
   feedback: readonly TrainingFeedback<I, O>[]; attempt: number;
 }
 export interface Proposer<I = unknown, O = unknown> {
@@ -54,6 +95,7 @@ export interface SearchStrategy {
 export interface Agent<I, O> {
   id: string; version: string; components: Components;
   mutable: Readonly<Record<string, MutableComponent>>;
+  structure?: AgentStructure;
   accounting: Accounting;
   run(args: { input: I; components: Components; context: RunContext }): Promise<InvocationResult<O>>;
   optimization: { proposer: Proposer<I, O>; maxAttempts?: number; strategy?: SearchStrategy };
@@ -79,5 +121,7 @@ export interface OptimizationResult<O> {
   evaluations: Evaluation<O>[];
   test?: { kind: 'paired' | 'identity-control'; baselineAccuracy: number; candidateAccuracy: number };
   accounting: { currency: 'USD'; limitMicros: number; occupiedMicros: number; entries: LedgerEntry[] };
-  provenance: { agentId: string; agentVersion: string; datasetId: string; datasetVersion: string; fingerprint: string; synthetic: boolean };
+  /** Text permissions and immutable agent metadata, retained for reviewable patch export. */
+  configuration?: { mutable: Readonly<Record<string, MutableComponent>>; structure?: AgentStructure };
+  provenance: { agentId: string; agentVersion: string; datasetId: string; datasetVersion: string; fingerprint: string; synthetic: boolean; benchmark?: BenchmarkProvenance };
 }

@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { Accounting, Agent, Candidate, Components, Evaluation, InvocationResult, LedgerEntry, OptimizationResult, OptimizeOptions, Proposer, RunContext, SearchStrategy } from './types.js';
 import { applyPatch, assert, clone, freeze, hash, micros, price, validateAccounting, validateAgent, validateOptions } from './validation.js';
 import { defaultRunDirectory, openStore } from './storage.js';
+import { proposalContext } from './structure.js';
 
 export function defineAgent<I, O>(agent: Agent<I, O>): Agent<I, O> { validateAgent(agent); return agent; }
 export function exactMatch<O>({ output, expected }: { output: O; expected: O }): boolean { return isDeepStrictEqual(output, expected); }
@@ -37,7 +38,8 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
   validateOptions(options);
   // Snapshot data/settings while retaining only explicitly supplied callbacks.
   const source = options.agent, d = options.dataset;
-  const agent: Agent<I, O> = { ...source, components: freeze(clone(source.components)), mutable: freeze(clone(source.mutable)), accounting: freeze(clone(source.accounting)),
+  const structure = proposalContext(source);
+  const agent: Agent<I, O> = { ...source, components: freeze(clone(source.components)), mutable: freeze(clone(source.mutable)), ...(structure ? { structure } : {}), accounting: freeze(clone(source.accounting)),
     optimization: { ...source.optimization, proposer: { ...source.optimization.proposer, accounting: freeze(clone(source.optimization.proposer.accounting)) } } };
   const dataset = { ...d, train: clone(d.train), validation: clone(d.validation), test: clone(d.test) };
   const strategy = agent.optimization.strategy ?? accuracyStrategy;
@@ -47,8 +49,8 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
   assert((dataset.train.length + dataset.validation.length) * bound + holdout <= cap, 'Budget cannot cover baseline and final test envelope');
   assert(!options.run?.resume || options.run.directory, 'Resume requires an explicit directory');
   const config = {
-    format: 1, engine: 'evopt-0.1.0', agent: { id: agent.id, version: agent.version, components: agent.components, mutable: agent.mutable, accounting: agent.accounting },
-    dataset: { id: dataset.id, version: dataset.version, train: dataset.train, validation: dataset.validation, test: dataset.test },
+    format: 1, engine: 'evopt-0.1.0', exportContract: 1, agent: { id: agent.id, version: agent.version, components: agent.components, mutable: agent.mutable, accounting: agent.accounting, ...(structure ? { structure } : {}) },
+    dataset: { id: dataset.id, version: dataset.version, train: dataset.train, validation: dataset.validation, test: dataset.test, ...(dataset.benchmark ? { benchmark: clone(dataset.benchmark) } : {}) },
     proposer: { id: agent.optimization.proposer.id, version: agent.optimization.proposer.version, accounting: agent.optimization.proposer.accounting },
     strategy: { id: strategy.id, version: strategy.version }, attempts: agent.optimization.maxAttempts ?? 10,
     objective: options.objective, cap, includeTraces: options.run?.includeTraces ?? false,
@@ -180,7 +182,7 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
               return { caseId: c.id, input: clone(c.input), expected: clone(c.expected), output: clone(e.output), passed: e.passed };
             });
             const proposed = await invoke(`proposal:${attempt}`, 'proposal', agent.optimization.proposer.accounting, context => agent.optimization.proposer.propose({
-              components: freeze(Object.fromEntries(Object.keys(agent.mutable).map(k => [k, incumbent.components[k]!]))), mutable: agent.mutable, feedback, attempt,
+              components: freeze(Object.fromEntries(Object.keys(agent.mutable).map(k => [k, incumbent.components[k]!]))), mutable: agent.mutable, feedback, attempt, ...(structure ? { structure } : {}),
             }, context));
             try {
               const components = applyPatch(incumbent.components, agent.mutable, proposed.output), id = hash(components);
@@ -215,9 +217,10 @@ export async function optimize<I, O>(options: OptimizeOptions<I, O>): Promise<Op
       components: selected.components, selectedId: selected.id,
       changes: Object.fromEntries(Object.keys(agent.mutable).filter(k => selected.components[k] !== agent.components[k]).map(k => [k, { before: agent.components[k]!, after: selected.components[k]! }])),
       candidates: s.candidates, history: s.history, evaluations: s.evaluations,
+      configuration: { mutable: agent.mutable, ...(structure ? { structure } : {}) },
       ...(s.phase === 'completed' ? { test: { kind: s.selectedId === baseId ? 'identity-control' : 'paired', baselineAccuracy: testAccuracy(baseId), candidateAccuracy: testAccuracy(s.selectedId) } } : {}),
       accounting: { currency: 'USD', limitMicros: cap, occupiedMicros: occupied(s.entries), entries: s.entries },
-      provenance: { agentId: agent.id, agentVersion: agent.version, datasetId: dataset.id, datasetVersion: dataset.version, fingerprint, synthetic: agent.accounting.kind === 'free' && agent.optimization.proposer.accounting.kind === 'free' },
+      provenance: { agentId: agent.id, agentVersion: agent.version, datasetId: dataset.id, datasetVersion: dataset.version, fingerprint, synthetic: agent.accounting.kind === 'free' && agent.optimization.proposer.accounting.kind === 'free', ...(config.dataset.benchmark ? { benchmark: config.dataset.benchmark } : {}) },
     } as OptimizationResult<O>);
   } finally { await store.close(); }
 }

@@ -17,6 +17,10 @@ const response = (content = '{"prompt":"improved"}', rest = {}) => new Response(
 
 test('Anthropic proposer sends explicit bounded Messages requests and normalizes cache usage', async () => {
   let calls = 0;
+  const structuredRequest = { ...request, components: { ...request.components, lookupDescription: 'PRIVATE-TOOL-TEXT' },
+    mutable: { prompt: { ...request.mutable.prompt, kind: 'prompt' as const, target: { type: 'node' as const, id: 'planner' } } },
+    structure: { version: 1 as const, nodes: [{ id: 'planner', role: 'Retrieve verified records', promptKeys: ['prompt', 'immutableSecret'], toolIds: ['lookup'] }],
+      tools: [{ id: 'lookup', descriptionKey: 'lookupDescription', inputSchema: { type: 'object', properties: { query: { type: 'string' } } }, constraints: ['Read-only'] }], handoffs: [] } };
   const proposer = createAnthropicProposer({ ...options, fetch: async (url, init) => {
     calls++;
     assert.equal(url, 'https://api.anthropic.com/v1/messages');
@@ -31,10 +35,15 @@ test('Anthropic proposer sends explicit bounded Messages requests and normalizes
     assert.deepEqual(body.output_config.format.schema.required, ['prompt']);
     assert.equal(body.tools, undefined); assert.equal(body.cache_control, undefined);
     assert.equal(JSON.stringify(body).includes('do-not-send'), false);
+    assert.equal(JSON.stringify(body).includes('PRIVATE-TOOL-TEXT'), false);
+    const payload = JSON.parse(body.messages[0].content);
+    assert.deepEqual(payload.structure, structuredRequest.structure);
+    assert.deepEqual(payload.components, { prompt: 'original' });
+    assert.deepEqual(payload.mutable.prompt.target, { type: 'node', id: 'planner' });
     return response();
   } });
   assert.equal(calls, 0);
-  const result = await proposer.propose(request, context());
+  const result = await proposer.propose(structuredRequest, context());
   assert.equal(calls, 1); assert.deepEqual(result.output, { prompt: 'improved' });
   assert.deepEqual(result.usage.receipts[0], { id: 'msg-1', provider: 'anthropic', model: 'mock-claude', inputTokens: 100, outputTokens: 20, cachedInputTokens: 40, reasoningTokens: 5 });
   assert.equal(price(proposer.accounting, result.usage.receipts), 104);

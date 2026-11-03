@@ -17,6 +17,10 @@ const response = (content = '{"prompt":"improved"}', rest = {}) => new Response(
 
 test('explicit OpenAI request, conservative bounds, and cached/reasoning usage', async () => {
   let calls = 0;
+  const structuredRequest = { ...request, components: { ...request.components, lookupDescription: 'PRIVATE-TOOL-TEXT' },
+    mutable: { prompt: { ...request.mutable.prompt, kind: 'prompt' as const, target: { type: 'node' as const, id: 'planner' } } },
+    structure: { version: 1 as const, nodes: [{ id: 'planner', role: 'Retrieve verified records', promptKeys: ['prompt', 'secretImmutable'], toolIds: ['lookup'] }],
+      tools: [{ id: 'lookup', descriptionKey: 'lookupDescription', inputSchema: { type: 'object', properties: { query: { type: 'string' } } }, constraints: ['Read-only'] }], handoffs: [] } };
   const proposer = createOpenAIProposer({ ...options, fetch: async (url, init) => {
     calls++;
     assert.equal(url, 'https://api.openai.com/v1/chat/completions');
@@ -28,9 +32,14 @@ test('explicit OpenAI request, conservative bounds, and cached/reasoning usage',
     assert.equal(body.response_format.type, 'json_schema');
     assert.deepEqual(body.response_format.json_schema.schema.required, ['prompt']);
     assert.equal(JSON.stringify(body).includes('do-not-send'), false);
+    assert.equal(JSON.stringify(body).includes('PRIVATE-TOOL-TEXT'), false);
+    const payload = JSON.parse(body.messages[1].content);
+    assert.deepEqual(payload.structure, structuredRequest.structure);
+    assert.deepEqual(payload.components, { prompt: 'original' });
+    assert.deepEqual(payload.mutable.prompt.target, { type: 'node', id: 'planner' });
     return response();
   } });
-  const result = await proposer.propose(request, context());
+  const result = await proposer.propose(structuredRequest, context());
   assert.equal(calls, 1);
   assert.deepEqual(result.output, { prompt: 'improved' });
   assert.deepEqual(result.usage.receipts[0], { id: 'chat-1', provider: 'openai', model: 'test-model', inputTokens: 100, outputTokens: 20, cachedInputTokens: 40, reasoningTokens: 5 });
