@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "demo": "npm run build && node dist/examples/offline.js"
+    "demo": "npm run build && node dist/examples/offline.js",
+    "experiment": "npm run build && node bin/experiment.mjs"
   },
   "repository": {
     "type": "git",
@@ -32,6 +33,14 @@
     "./openai": {
       "types": "./dist/src/openai.d.ts",
       "import": "./dist/src/openai.js"
+    },
+    "./anthropic": {
+      "types": "./dist/src/anthropic.d.ts",
+      "import": "./dist/src/anthropic.js"
+    },
+    "./gemini": {
+      "types": "./dist/src/gemini.d.ts",
+      "import": "./dist/src/gemini.js"
     }
   },
   "engines": {

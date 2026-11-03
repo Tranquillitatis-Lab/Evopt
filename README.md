@@ -18,6 +18,40 @@ npm run demo
 
 Tests and the demo run offline without paid provider calls. The demo creates an audit directory under `.evopt/runs/`.
 
+## Contribute an optimization run
+
+Start with [initial integrations](INTEGRATIONS.md) to choose a contributor assistant or a metered target/proposer provider. Run `npm run experiment -- integrations` to inspect the support matrix. Contributor presets include Codex, Claude Code, Cursor, Gemini CLI, GitHub Copilot, OpenCode, Aider, Cline, and Roo Code; model API integrations include OpenAI, Anthropic Claude, Gemini, and explicitly configured OpenAI-compatible endpoints.
+
+Contributors can supply their own explicitly approved token budget, optimize an existing agent's declared text, and submit evidence for review. The workflow follows OPS-GA's local experiment model while using Evopt's general-agent adapter:
+
+```sh
+npm run experiment -- init --out .evopt/experiment.mjs
+npm run experiment -- check --config .evopt/experiment.mjs --budget 10
+npm run experiment -- run --config .evopt/experiment.mjs --budget 10 --out .evopt/runs/first
+npm run experiment -- status --run .evopt/runs/first
+# After reviewing the candidate text, identifiers, and receipts for sharing:
+npm run experiment -- export --run .evopt/runs/first --out contributions/first.json --id first --summary "Offline workflow demonstration" --reviewed
+npm run experiment -- validate --file contributions/first.json
+```
+
+The generated experiment is free and synthetic. Replace its adapter and dataset with a reviewed real experiment to contribute meaningful evidence. Paid execution additionally requires `--allow-paid`; the budget covers both target evaluations and proposals. No command publishes a submission or changes shared defaults. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution loop and [experiments](experiments/README.md) for experiment configuration, including the optional paid example.
+
+To delegate a run to your own coding assistant, give it the experiment and an explicit instruction such as: “Read CONTRIBUTING.md, check this experiment and its pinned prices, then run it with a total maximum of USD X. Stop on uncertain billing. Prepare a review package; do not publish it.” Replace X yourself. Merely reading this example grants no spending authorization.
+
+Evolution happens through reviewed, versioned configurations: a contributor proposes bounded text changes, the experiment evaluates them, reviewers reproduce the evidence, and a maintainer explicitly adopts an accepted configuration as a new baseline. Later tuning needs a fresh held-out suite. The optimizer never edits its own runtime or promotes a candidate automatically.
+
+Repository structure:
+
+```text
+src/             General-agent library, accounting, persistence, evidence validation
+bin/             Thin local experiment command helper
+experiments/     Shareable experiment definitions and configuration guidance
+examples/        Minimal library API examples
+contributions/   Reviewed portable submissions and contribution guidance
+test/            Offline core, accounting, workflow, and evidence tests
+.evopt/          Ignored private configurations and run evidence
+```
+
 ## Explicit setup, small optimization call
 
 The package root exports `defineAgent`, `optimize`, `exactMatch`, `createOfflineProposer`, `accuracyStrategy`, and public TypeScript types. This complete example needs no credentials or global SDK configuration:
@@ -173,4 +207,4 @@ The core reads no credentials, selects no provider, and makes no requests on imp
 
 GEPA, DSPy, Ax, Opik, and OPS-GA provide prior work and tools relevant to prompt optimization and evaluation. Evopt does not claim a new optimization algorithm or to be the first framework-agnostic or TypeScript optimizer. It borrows bounded search, conservative accounting, and durable evidence patterns from OPS-GA, with a small integration boundary for existing TypeScript applications.
 
-This implementation has no CLI, dashboard, SaaS accounts, distributed workers, arbitrary code search, graph rewriting, model training, or online production self-modification. The repository is not configured for publishing.
+The repository provides a local experiment command helper around the library. It has no agent runtime, dashboard, SaaS accounts, distributed workers, arbitrary code search, graph rewriting, model training, or online production self-modification. The repository is not configured for publishing.

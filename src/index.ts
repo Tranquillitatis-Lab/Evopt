@@ -1,2 +1,10 @@
 export * from './types.js';
 export { optimize, defineAgent, accuracyStrategy, createOfflineProposer, exactMatch } from './optimize.js';
+export { defineExperiment, checkExperiment, runExperiment, experimentStatus } from './experiments.js';
+export type { Experiment, ExperimentRunOptions } from './experiments.js';
+export { buildSubmission, validateSubmission } from './contributions.js';
+export type { Submission, SubmissionMetadata, SubmissionEvaluation, SubmissionValidation } from './contributions.js';
+export { listAssistants, resolveAssistant, renderAssistantBrief } from './assistants.js';
+export type { AssistantId, AssistantPreset } from './assistants.js';
+export { listProviders, resolveProvider, listFrameworkBridges } from './integrations.js';
+export type { ProviderId } from './integrations.js';
