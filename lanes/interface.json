@@ -1,0 +1,8 @@
+{
+  "id": "interface",
+  "scope": "Session-local supplemental tool guidance; standalone OPS source/schema rewrites require an external trusted adapter",
+  "protectedPolicy": "Do not change tool names, parameter keys/types/defaults/enums, permissions, CAS, completeness, side effect or retry semantics. Preserve ignore/symlink scope and path base facts. SDK loading takes effect next step.",
+  "genes": {
+    "guidance": { "type": "text", "maxChars": 3000, "initial": "Use stat for metadata, read_files for content, and inspect for structural information. grep patterns are regular expressions; replacement text matching may be literal: check the tool contract. glob takes arrays; use **/*.js for recursion, not *.js. Check result status, coverage, revision and recovery facts before proceeding." }
+  }
+}

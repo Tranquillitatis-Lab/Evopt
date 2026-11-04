@@ -1,55 +1,26 @@
 {
   "name": "evopt",
   "version": "0.1.0",
-  "description": "Bounded prompt and tool-description optimization for existing agents",
-  "main": "./dist/src/index.js",
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test dist/test/*.test.js",
-    "demo": "npm run build && node dist/examples/offline.js",
-    "experiment": "npm run build && node bin/experiment.mjs",
-    "benchmark": "npm run build && node bin/benchmark.mjs",
-    "swe": "npm run build && node bin/swe.mjs"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Tranquillitatis-Lab/Evopt.git"
-  },
-  "keywords": [],
-  "type": "module",
-  "bugs": {
-    "url": "https://github.com/Tranquillitatis-Lab/Evopt/issues"
-  },
-  "homepage": "https://github.com/Tranquillitatis-Lab/Evopt#readme",
-  "devDependencies": {
-    "@types/node": "^26.6.6",
-    "typescript": "^7.0.2"
-  },
   "private": true,
+  "type": "module",
+  "description": "Budgeted prompt and tool-description optimization for existing agents",
+  "engines": { "node": ">=22" },
+  "bin": { "evopt": "dist/bin/evopt.js" },
   "types": "./dist/src/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/src/index.d.ts",
-      "import": "./dist/src/index.js"
-    },
-    "./openai": {
-      "types": "./dist/src/openai.d.ts",
-      "import": "./dist/src/openai.js"
-    },
-    "./anthropic": {
-      "types": "./dist/src/anthropic.d.ts",
-      "import": "./dist/src/anthropic.js"
-    },
-    "./benchmarks": {
-      "types": "./dist/benchmarks/index.d.ts",
-      "import": "./dist/benchmarks/index.js"
-    },
-    "./gemini": {
-      "types": "./dist/src/gemini.d.ts",
-      "import": "./dist/src/gemini.js"
-    }
+    ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" },
+    "./openai": { "types": "./dist/src/openai.d.ts", "import": "./dist/src/openai.js" },
+    "./adapters": { "types": "./dist/src/adapters/index.d.ts", "import": "./dist/src/adapters/index.js" },
+    "./adapters/openai": { "types": "./dist/src/adapters/openai.d.ts", "import": "./dist/src/adapters/openai.js" },
+    "./adapters/anthropic": { "types": "./dist/src/adapters/anthropic.d.ts", "import": "./dist/src/adapters/anthropic.js" },
+    "./adapters/claude": { "types": "./dist/src/adapters/anthropic.d.ts", "import": "./dist/src/adapters/anthropic.js" },
+    "./benchmarks": { "types": "./dist/benchmarks/index.d.ts", "import": "./dist/benchmarks/index.js" }
   },
-  "engines": {
-    "node": ">=22"
+  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.7.0" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "evopt": "node dist/bin/evopt.js",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "demo": "npm run build && node dist/bin/evopt.js run --config examples/offline.json"
   }
 }

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "title": "REPLACE_WITH_A_SHORT_DESCRIPTION",
+  "lane": "REPLACE_WITH_LANE_ID",
+  "benchmark": {
+    "name": "SWE-bench",
+    "dataset": "REPLACE_WITH_DATASET_ID",
+    "datasetRevision": "REPLACE_WITH_PINNED_REVISION",
+    "harnessRevision": "REPLACE_WITH_PINNED_COMMIT",
+    "partitionProtocol": "DESCRIBE_TRAIN_VALIDATION_TEST_SELECTION"
+  },
+  "agent": {
+    "id": "REPLACE_WITH_AGENT_ID",
+    "version": "REPLACE_WITH_AGENT_VERSION",
+    "provider": "REPLACE_WITH_PROVIDER",
+    "model": "REPLACE_WITH_MODEL_AND_VERSION",
+    "settings": "DESCRIBE_RELEVANT_AGENT_AND_MODEL_SETTINGS"
+  },
+  "artifacts": {
+    "export": { "path": "result.json", "sha256": "REPLACE_WITH_SHA256" },
+    "configuration": { "path": "run-config.json", "sha256": "REPLACE_WITH_SHA256" }
+  },
+  "results": {
+    "testTasks": null,
+    "baselineTokens": null,
+    "candidateTokens": null,
+    "baselineSuccesses": null,
+    "candidateSuccesses": null,
+    "totalCostUSD": null,
+    "uncertainty": "DESCRIBE_UNCERTAINTY_FROM_THE_EXPORT"
+  },
+  "reproduction": {
+    "requirements": "DESCRIBE_SETUP_AND_AGENT_ADAPTER",
+    "commands": ["REPLACE_WITH_REPRODUCTION_COMMANDS"],
+    "budgetUSD": null,
+    "maxTokens": null
+  },
+  "limitations": ["DESCRIBE_LIMITATIONS_AND_ANY_UNAVAILABLE_EVIDENCE"],
+  "review": {
+    "reviewedByContributor": false,
+    "containsCredentials": null,
+    "redistributionAllowed": false,
+    "method": "DESCRIBE_REVIEW_AND_REDACTION"
+  }
+}

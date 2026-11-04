@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "agentModule": "../dist/examples/offline-agent.js",
+  "datasetModule": "../dist/examples/offline-dataset.js",
+  "lanes": ["../lanes/operations.json"],
+  "output": "../.evopt/offline",
+  "budget": { "maxUSD": 1, "maxTokens": 100000 },
+  "seed": 42,
+  "search": { "population": 4, "generations": 2, "elites": 2, "llmMutation": false },
+  "evaluation": { "repetitions": 1, "order": "balanced" }
+}

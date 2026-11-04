@@ -1,0 +1,9 @@
+{
+  "id": "ptc",
+  "scope": "PTC strategy and output templates, not execution engine or sandbox",
+  "protectedPolicy": "SDK loading is effective next step. Preserve revisions, result completeness, errors and effect/retry facts. Never bypass permissions. Do not retry unknown write effects. ops_batch supports copy/move/remove only.",
+  "genes": {
+    "template": { "type": "text", "maxChars": 4000, "initial": "For multi-step work, use available PTC APIs for loops, filtering and aggregation. Print only task-relevant rows, paths, revisions, coverage and error/effect facts. Check status before extracting data. Stop or inspect ambiguous side effects. Do not serialize whole intermediate objects by default." },
+    "threshold": { "type": "choice", "initial": "Use native calls for simple one- or two-step tasks.", "values": ["Use native calls for simple one- or two-step tasks.", "Use PTC only when repeated processing outweighs SDK/code overhead."] }
+  }
+}

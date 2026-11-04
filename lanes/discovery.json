@@ -1,0 +1,9 @@
+{
+  "id": "discovery",
+  "scope": "Discovery query and loading strategy; actual resident tool changes require a trusted deployment adapter",
+  "protectedPolicy": "Use only published tools. Newly discovered/loaded tools are available next step, not in the current call. Broaden queries when results are uncertain. Do not replace sandbox or authorization boundaries.",
+  "genes": {
+    "query": { "type": "choice", "initial": "Search capabilities with concise English operation keywords.", "values": ["Search capabilities with concise English operation keywords.", "Translate non-English intent into English capability keywords, including discriminating constraints."] },
+    "loading": { "type": "text", "maxChars": 2500, "initial": "Prefer existing suitable tools. Discover only missing capabilities. Avoid repeatedly loading the same tool. Keep a stable tool set for a task phase. If top candidates do not fit, broaden discovery instead of forcing a near match." }
+  }
+}

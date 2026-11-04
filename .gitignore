@@ -1,7 +1,9 @@
 node_modules/
 dist/
 .evopt/
+.evopt-run/
+.runs/
+.local/
 .env
 .env.*
 *.local.json
-*.local.mjs

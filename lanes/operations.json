@@ -1,0 +1,10 @@
+{
+  "id": "operations",
+  "scope": "Operating strategy only; no tool contract changes",
+  "protectedPolicy": "Respect authorization, revision/CAS preconditions, scan and page completeness, and retry/effect state. Unknown write effects require inspection, never blind retry. Expand evidence when insufficient. SDK loaded now becomes available next step.",
+  "genes": {
+    "strategy": { "type": "text", "initial": "Scope search by path or symbol. Read relevant windows, expand when insufficient. Group independent reads. Select output mode by intent: file list for locating files; content for understanding or edits. Verify revisions before writes and validate completed work.", "maxChars": 3000 },
+    "searchMode": { "type": "choice", "initial": "Return relevant content when editing; otherwise prefer a file list.", "values": ["Return relevant content when editing; otherwise prefer a file list.", "First inspect compact counts or file lists, then request relevant content if the task needs it."] },
+    "readStrategy": { "type": "choice", "initial": "Read targeted windows and expand if needed.", "values": ["Read targeted windows and expand if needed.", "Batch independent targeted reads, retaining paths, coverage and revisions."] }
+  }
+}
